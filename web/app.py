@@ -2,7 +2,7 @@ import os
 import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
-from flask import Flask, render_template_string, request, jsonify, redirect, url_for
+from flask import Flask, render_template_string, request, jsonify, redirect, url_for, Markup
 from datetime import date, timedelta
 from db.database import (
     get_daily_report, get_mixer_shifts, get_pallets,
@@ -108,7 +108,7 @@ TEMPLATE = """
 
 
 def render(page, content):
-    return render_template_string(TEMPLATE, page=page, content=content)
+    return render_template_string(TEMPLATE, page=page, content=Markup(content))
 
 
 def badge(pct):
