@@ -7,7 +7,7 @@ from datetime import date, timedelta
 from db.database import (
     get_daily_report, get_mixer_shifts, get_pallets,
     get_tasks, get_recipe, save_task, update_recipe, init_db,
-    get_all_users, add_user, remove_user
+    get_all_users, revoke_user, get_codes, update_code
 )
 
 app = Flask(__name__)
@@ -399,17 +399,11 @@ def users_page():
         action = request.form.get("action")
         try:
             if action == "add":
-                tg_id = int(request.form["tg_id"])
-                name = request.form["name"]
-                role = request.form["role"]
-                add_user(tg_id, name, role)
-                msg = '<div style="color:var(--green);margin-bottom:12px">✅ Пользователь добавлен</div>'
+                msg = '<div style="color:var(--amber);margin-bottom:12px">Добавление через бота: оператор вводит /start и код доступа</div>'
             elif action == "remove":
                 tg_id = int(request.form["tg_id"])
-                if remove_user(tg_id):
-                    msg = '<div style="color:var(--green);margin-bottom:12px">✅ Пользователь удалён</div>'
-                else:
-                    msg = '<div style="color:var(--amber);margin-bottom:12px">Пользователь не найден</div>'
+                revoke_user(tg_id)
+                msg = '<div style="color:var(--green);margin-bottom:12px">✅ Доступ отозван</div>'
         except Exception as e:
             msg = f'<div style="color:var(--red);margin-bottom:12px">Ошибка: {e}</div>'
 
