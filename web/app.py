@@ -25,6 +25,7 @@ NAV = [
     ("/lacquer", "Лак"),
     ("/tasks", "Задание"),
     ("/recipe", "Рецептура"),
+    ("/users", "👥 Пользователи"),
     ("/export", "📥 Экспорт"),
 ]
 
@@ -479,6 +480,70 @@ def tasks_page():
       </div>
     </div>"""
     return render("/tasks", content)
+
+
+@app.route("/users", methods=["GET","POST"])
+def users_page():
+    msg = ""
+    if request.method == "POST":
+        try:
+            tg_id = int(request.form.get("tg_id", 0))
+            if tg_id:
+                revoke_user(tg_id)
+                msg = f'<div style="color:var(--grn);margin-bottom:12px">✅ Пользователь {tg_id} удалён</div>'
+        except Exception as e:
+            msg = f'<div style="color:var(--red);margin-bottom:12px">Ошибка: {e}</div>'
+
+    users = get_all_users()
+    codes = get_codes()
+
+    ROLE_NAMES = {"mixer":"🧪 Миксерщик","extruder":"⚙️ Экструзия","lacquer":"🎨 Лак","boss":"👑 Руководитель"}
+
+    user_rows = ""
+    for u in users:
+        role_name = ROLE_NAMES.get(u["role"], u["role"])
+        username = f"@{u['username']}" if u.get("username") else "—"
+        auth_date = str(u.get("authorized_at",""))[:16]
+        user_rows += f"""<tr>
+            <td><b>{u["name"]}</b><br><span style="color:var(--mut);font-size:11px">{username}</span></td>
+            <td>{role_name}</td>
+            <td style="font-size:11px;color:var(--mut)">{auth_date}</td>
+            <td><code style="font-size:11px">{u["tg_id"]}</code></td>
+            <td>
+                <form method="post" onsubmit="return confirm('Удалить {u["name"]}?')" style="display:inline">
+                    <input type="hidden" name="tg_id" value="{u["tg_id"]}">
+                    <button type="submit" class="btn" style="color:var(--red);border-color:var(--red);padding:3px 10px;font-size:11px">
+                        🗑 Удалить
+                    </button>
+                </form>
+            </td>
+        </tr>"""
+
+    code_rows = ""
+    for c in codes:
+        role_name = ROLE_NAMES.get(c["role"], c["role"])
+        code_rows += f"""<tr>
+            <td>{role_name}</td>
+            <td><code style="background:var(--bg);padding:3px 8px;border-radius:4px;font-size:13px">{c["code"]}</code></td>
+        </tr>"""
+
+    content_html = f"""{msg}
+    <div class="two">
+        <div class="card">
+            <h2>👥 Авторизованные пользователи ({len(users)})</h2>
+            {"<div style='overflow-x:auto'><table><thead><tr><th>Имя</th><th>Роль</th><th>Вошёл</th><th>Telegram ID</th><th>Действие</th></tr></thead><tbody>" + user_rows + "</tbody></table></div>" if user_rows else "<p style='color:var(--mut);text-align:center;padding:20px'>Нет пользователей</p>"}
+        </div>
+        <div class="card">
+            <h2>🔑 Коды доступа</h2>
+            <p style="font-size:12px;color:var(--mut);margin-bottom:10px">Раздайте эти коды сотрудникам. Код вводится один раз при /start</p>
+            <table><thead><tr><th>Роль</th><th>Код</th></tr></thead>
+            <tbody>{code_rows}</tbody></table>
+            <div style="margin-top:14px;padding-top:12px;border-top:1px solid var(--bor);font-size:12px;color:var(--mut)">
+                Сменить код в боте: <code>/code mixer новый_код</code>
+            </div>
+        </div>
+    </div>"""
+    return render("/users", content_html)
 
 @app.route("/recipe", methods=["GET","POST"])
 def recipe_page():
