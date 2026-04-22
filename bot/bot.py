@@ -114,13 +114,13 @@ def role_menu(role):
                   "📋 Задание на неделю", "🏭 Транзит",
                   "🏪 Склад", "⚗️ Рецептура",
                   "🤖 ИИ Ассистент", "👥 Пользователи",
-                  "🔑 Коды доступа")
+                  "🔑 Коды доступа", "🚪 Выйти")
     elif role == "mixer":
-        return kb("➕ Внести смену", "🏠 Меню")
+        return kb("➕ Внести смену", "🏠 Меню", "🚪 Выйти")
     elif role == "extruder":
-        return kb("📋 Задание на смену", "🏭 Транзит", "🏠 Меню")
+        return kb("📋 Задание на смену", "🏭 Транзит", "🚪 Выйти")
     elif role == "lacquer":
-        return kb("📦 Транзитная зона", "✅ Обработать паллету", "🏪 Склад", "🏠 Меню")
+        return kb("📦 Транзитная зона", "✅ Обработать паллету", "🏪 Склад", "🚪 Выйти")
     return remove_kb()
 
 async def show_menu(message, role):
@@ -296,8 +296,8 @@ async def ext_task_select(message: types.Message, state: FSMContext):
             await message.answer(
                 f"📦 Паллета готова: <b>{decor}</b>\n\n"
                 f"Осталось произвести: {remaining} листов\n\n"
-                f"Сколько листов на этой паллете?",
-                reply_markup=kb(str(default_qty), "150", "200", "◀️ Назад")
+                f"Введите точное количество листов или выберите:",
+                reply_markup=kb(str(default_qty), "150", "200", "250", "◀️ Назад")
             )
         except Exception as e:
             await message.answer(f"Ошибка: {e}")
@@ -312,10 +312,14 @@ async def ext_task_confirm(message: types.Message, state: FSMContext):
     if message.text == "◀️ Назад":
         await show_task_list(message, state); return
 
+    if message.text == "◀️ Назад":
+        await show_task_list(message, state); return
     try:
-        qty = int(message.text)
+        qty = int(message.text.strip())
+        if qty <= 0 or qty > 500:
+            await message.answer("Введите число от 1 до 500"); return
     except ValueError:
-        await message.answer("Введите число листов"); return
+        await message.answer("⚠️ Введите число, например: 175"); return
 
     result = post_complete(data["task_id"], data.get("operator",""), qty)
     if not result:
