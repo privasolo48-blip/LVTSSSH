@@ -18,6 +18,40 @@ from db.database import (
 )
 
 BOT_TOKEN = os.getenv("BOT_TOKEN", "ВСТАВЬ_ТОКЕН")
+WEB_URL = os.getenv("WEB_URL", "").rstrip("/")
+
+import urllib.request, json as _json
+
+def fetch_tasks():
+    """Получить задание из веб-панели (единый источник правды)"""
+    if not WEB_URL:
+        return []
+    try:
+        with urllib.request.urlopen(f"{WEB_URL}/api/tasks", timeout=5) as r:
+            data = _json.loads(r.read())
+            return data.get("tasks", [])
+    except Exception as e:
+        print(f"[fetch_tasks error] {e}", flush=True)
+        return []
+
+def post_complete(task_id, operator, qty):
+    """Отметить паллету как выполненную через API"""
+    if not WEB_URL:
+        return complete_task_pallet(task_id, operator, qty)
+    try:
+        payload = _json.dumps({"task_id": task_id, "operator": operator, "qty": qty}).encode()
+        req = urllib.request.Request(
+            f"{WEB_URL}/api/complete_pallet",
+            data=payload,
+            headers={"Content-Type": "application/json"},
+            method="POST"
+        )
+        with urllib.request.urlopen(req, timeout=5) as r:
+            data = _json.loads(r.read())
+            return data.get("result") if data.get("ok") else None
+    except Exception as e:
+        print(f"[post_complete error] {e}", flush=True)
+        return complete_task_pallet(task_id, operator, qty)
 bot = Bot(token=BOT_TOKEN, parse_mode="HTML")
 dp = Dispatcher(bot, storage=MemoryStorage())
 
@@ -77,9 +111,9 @@ def today():
 def role_menu(role):
     if role == "boss":
         return kb("📊 Отчёт за сегодня", "📅 Отчёт за дату",
-                  "📋 Недельное задание", "⚗️ Рецептура",
-                  "🏭 Транзит", "🏪 Склад",
-                  "👥 Пользователи", "🔑 Коды доступа")
+                  "⚗️ Рецептура", "🏭 Транзит",
+                  "🏪 Склад", "👥 Пользователи",
+                  "🔑 Коды доступа")
     elif role == "mixer":
         return kb("➕ Внести смену", "🏠 Меню")
     elif role == "extruder":
@@ -183,7 +217,7 @@ async def ext_task_start(message: types.Message, state: FSMContext):
     if get_user_role(message.from_user.id) not in ("extruder", "boss"):
         await message.answer("⛔ Нет доступа"); return
     await state.finish()
-    tasks = get_active_tasks()
+    tasks = fetch_tasks()
     if not tasks:
         await message.answer(
             "📋 Задание на эту неделю не задано.\n\nОбратитесь к руководителю.",
@@ -198,7 +232,7 @@ async def ext_task_operator(message: types.Message, state: FSMContext):
     await show_task_list(message, state)
 
 async def show_task_list(message, state):
-    tasks = get_active_tasks()
+    tasks = fetch_tasks()
     data = await state.get_data()
     lines = []
     btns = []
@@ -245,7 +279,7 @@ async def ext_task_select(message: types.Message, state: FSMContext):
         try:
             decor = message.text.replace("✔️ ", "").split(" (")[0].strip()
             # Найти task_id по декору
-            tasks = get_active_tasks()
+            tasks = fetch_tasks()
             task = next((t for t in tasks if t["decor"] == decor), None)
             if not task:
                 await message.answer("Задание не найдено."); return
@@ -282,7 +316,7 @@ async def ext_task_confirm(message: types.Message, state: FSMContext):
     except ValueError:
         await message.answer("Введите число листов"); return
 
-    result = complete_task_pallet(data["task_id"], data.get("operator",""), qty)
+    result = post_complete(data["task_id"], data.get("operator",""), qty)
     if not result:
         await message.answer("Ошибка — задание не найдено"); return
 
