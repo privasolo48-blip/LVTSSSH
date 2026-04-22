@@ -319,8 +319,13 @@ def save_task(week_start, decor, length, thickness, overlay, plan_qty):
                  (week_start,decor,length,thickness,overlay,plan_qty))
     conn.commit(); conn.close()
 
-def get_tasks(week_start):
+def get_tasks(week_start=None):
     conn = get_conn()
+    if not week_start:
+        latest = conn.execute(
+            "SELECT week_start FROM weekly_tasks ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+        week_start = latest["week_start"] if latest else ""
     rows = conn.execute("SELECT * FROM weekly_tasks WHERE week_start=? ORDER BY id",(week_start,)).fetchall()
     conn.close()
     return rows
@@ -422,9 +427,16 @@ def get_current_week_start():
     return monday.strftime("%d.%m.%Y")
 
 def get_active_tasks():
-    """Активные задания текущей недели с прогрессом"""
+    """Активные задания — берём самую свежую неделю где есть задания"""
     conn = get_conn()
-    week = get_current_week_start()
+    # Ищем последнюю неделю с заданиями (не фиксируем дату жёстко)
+    latest = conn.execute(
+        "SELECT week_start FROM weekly_tasks ORDER BY id DESC LIMIT 1"
+    ).fetchone()
+    if not latest:
+        conn.close()
+        return []
+    week = latest["week_start"]
     tasks = conn.execute(
         "SELECT * FROM weekly_tasks WHERE week_start=? ORDER BY id", (week,)
     ).fetchall()
@@ -440,6 +452,7 @@ def get_active_tasks():
         pallets_needed = -(-t["plan_qty"] // 150)  # ceiling division
         result.append({
             "id": t["id"],
+            "week_start": t["week_start"],
             "decor": t["decor"],
             "length": t["length"],
             "thickness": t["thickness"],
