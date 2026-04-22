@@ -111,9 +111,9 @@ def today():
 def role_menu(role):
     if role == "boss":
         return kb("📊 Отчёт за сегодня", "📅 Отчёт за дату",
-                  "⚗️ Рецептура", "🏭 Транзит",
-                  "🏪 Склад", "👥 Пользователи",
-                  "🔑 Коды доступа")
+                  "📋 Задание на неделю", "🏭 Транзит",
+                  "🏪 Склад", "⚗️ Рецептура",
+                  "👥 Пользователи", "🔑 Коды доступа")
     elif role == "mixer":
         return kb("➕ Внести смену", "🏠 Меню")
     elif role == "extruder":
@@ -242,10 +242,10 @@ async def show_task_list(message, state):
         lines.append(
             f"{status} <b>{t['decor']}</b> · {t['length']}мм · {t['thickness']}мм\n"
             f"   {bar} {t['pct']}%\n"
-            f"   Сделано: {t['qty_done']}/{t['plan_qty']} листов ({t['pallets_done']} паллет из {t['pallets_needed']})"
+            f"   Сделано: {t['done_qty']}/{t['plan_qty']} листов ({t['done_cnt']} паллет из {t['pallets_needed']})"
         )
         if not t["done"]:
-            btns.append(f"✔️ {t['decor']} ({t['pallets_done']}/{t['pallets_needed']})")
+            btns.append(f"✔️ {t['decor']} ({t['done_cnt']}/{t['pallets_needed']})")
 
     btns.append("⚠️ Замечание")
     btns.append("🏠 Меню")
@@ -287,10 +287,10 @@ async def ext_task_select(message: types.Message, state: FSMContext):
                 await message.answer(f"✅ {decor} уже полностью выполнен!"); return
 
             await state.update_data(task_id=task["id"], decor=decor,
-                                    plan_qty=task["plan_qty"], qty_done=task["qty_done"])
+                                    plan_qty=task["plan_qty"], qty_done=task["done_qty"])
             await ExtruderTask.confirm_qty.set()
 
-            remaining = task["plan_qty"] - task["qty_done"]
+            remaining = task["plan_qty"] - task["done_qty"]
             default_qty = min(150, remaining)
             await message.answer(
                 f"📦 Паллета готова: <b>{decor}</b>\n\n"
@@ -321,15 +321,15 @@ async def ext_task_confirm(message: types.Message, state: FSMContext):
         await message.answer("Ошибка — задание не найдено"); return
 
     transit = get_transit_count()
-    pct = round(result["qty_done"] / result["plan_qty"] * 100) if result["plan_qty"] else 0
+    pct = round(result["done_qty"] / result["plan_qty"] * 100) if result["plan_qty"] else 0
     done_flag = "✅ Задание выполнено!" if pct >= 100 else ""
 
     await message.answer(
         f"✅ Паллета #{result['pallet_num']} записана!\n"
         f"🎨 {result['decor']} · {qty} листов\n"
         f"🏭 Отправлена в транзитную зону\n\n"
-        f"Прогресс: {result['qty_done']}/{result['plan_qty']} листов ({pct}%)\n"
-        f"Паллет сдано: {result['pallets_done']}\n"
+        f"Прогресс: {result['done_qty']}/{result['plan_qty']} листов ({pct}%)\n"
+        f"Паллет сдано: {result['done_cnt']}\n"
         f"{done_flag}"
     )
     # Вернуться к списку заданий
@@ -562,6 +562,41 @@ async def code_update(message: types.Message, state: FSMContext):
     if len(p) < 3: await message.answer("Формат: /code роль код"); return
     update_code(p[1], p[2])
     await message.answer(f"✅ Код для {p[1]}: <code>{p[2]}</code>")
+
+
+@dp.message_handler(lambda m: m.text == "📋 Задание на неделю", state="*")
+async def boss_view_tasks(message: types.Message, state: FSMContext):
+    role = get_user_role(message.from_user.id)
+    if role not in ("boss", "extruder"):
+        await message.answer("⛔ Нет доступа"); return
+    tasks = fetch_tasks()
+    if not tasks:
+        await message.answer(
+            "📋 Задание не задано.\n\nДобавьте задание через веб-панель → раздел Задание.",
+            reply_markup=role_menu(role)
+        ); return
+    week = tasks[0].get("week_start", "")
+    lines = []
+    total_plan = 0
+    total_done = 0
+    for t in tasks:
+        status = "✅" if t["done"] else ("🟡" if t["pct"] >= 50 else "🔴")
+        bar = "█" * (t["pct"] // 10) + "░" * (10 - t["pct"] // 10)
+        lines.append(
+            f"{status} <b>{t['decor']}</b>\n"
+            f"   {bar} {t['pct']}%\n"
+            f"   {t['done_qty']}/{t['plan_qty']} листов · {t['done_cnt']}/{t['pallets_needed']} паллет"
+        )
+        total_plan += t["plan_qty"]
+        total_done += t["done_qty"]
+    total_pct = round(total_done / total_plan * 100) if total_plan else 0
+    await message.answer(
+        f"📋 <b>Задание · неделя с {week}</b>\n\n" +
+        "\n\n".join(lines) +
+        f"\n\n{'─'*25}\n"
+        f"Итого: {total_done}/{total_plan} листов ({total_pct}%)",
+        reply_markup=role_menu(role)
+    )
 
 @dp.message_handler(state="*")
 async def fallback(message: types.Message, state: FSMContext):
