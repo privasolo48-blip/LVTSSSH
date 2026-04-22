@@ -8,7 +8,8 @@ from db.database import (
     get_recipe, save_task, update_recipe, init_db,
     get_all_users, revoke_user, get_codes, update_code,
     get_transit_pallets, get_warehouse_summary, get_warehouse_total,
-    get_warehouse_pallets, get_lacquer_records, get_full_export
+    get_warehouse_pallets, get_lacquer_records, get_full_export,
+    get_active_tasks, complete_task_pallet
 )
 
 app = Flask(__name__)
@@ -295,7 +296,7 @@ def export_download():
         import openpyxl
         from openpyxl.styles import Font, PatternFill, Alignment
     except ImportError:
-        return "openpyxl не установлен. Добавьте в requirements.txt", 500
+        return '<h3 style="font-family:sans-serif;padding:40px;color:#A32D2D">❌ Модуль openpyxl не установлен.<br><br>Обновите requirements.txt и задеплойте заново.</h3>', 500
 
     report_type = request.args.get("report_type","all")
     date_from = request.args.get("date_from","")
@@ -506,6 +507,51 @@ def recipe_page():
       </div>
     </div>"""
     return render("/recipe", content)
+
+
+# ── API для бота ──────────────────────────────────────────────────────────────
+
+@app.route("/api/tasks")
+def api_tasks():
+    """Возвращает актуальное задание в JSON для бота"""
+    tasks = get_tasks()  # берёт последнее задание
+    result = []
+    for t in tasks:
+        # Считаем прогресс
+        pallets = get_pallets()
+        done_qty = sum(p["qty"] for p in pallets if p["decor"] == t["decor"])
+        done_cnt = sum(1 for p in pallets if p["decor"] == t["decor"])
+        plan = t["plan_qty"]
+        pallets_needed = -(-plan // 150)
+        result.append({
+            "id": t["id"],
+            "week_start": t["week_start"],
+            "decor": t["decor"],
+            "length": t["length"],
+            "thickness": t["thickness"],
+            "overlay": t["overlay"],
+            "plan_qty": plan,
+            "done_qty": done_qty,
+            "done_cnt": done_cnt,
+            "pallets_needed": pallets_needed,
+            "pct": round(done_qty / plan * 100) if plan else 0,
+            "done": done_qty >= plan,
+        })
+    from flask import jsonify
+    return jsonify({"tasks": result, "week": result[0]["week_start"] if result else ""})
+
+@app.route("/api/complete_pallet", methods=["POST"])
+def api_complete_pallet():
+    """Оператор отметил паллету как выполненную"""
+    from flask import jsonify
+    data = request.get_json()
+    task_id = data.get("task_id")
+    operator = data.get("operator", "")
+    qty = data.get("qty", 150)
+    result = complete_task_pallet(task_id, operator, qty)
+    if result:
+        return jsonify({"ok": True, "result": result})
+    return jsonify({"ok": False, "error": "Task not found"}), 404
 
 if __name__ == "__main__":
     init_db()
