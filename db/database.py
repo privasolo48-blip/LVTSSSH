@@ -411,4 +411,85 @@ def get_full_export(date=None):
     }
 
 
+
+# ── ЗАДАНИЕ-ОРИЕНТИРОВАННАЯ ЭКСТРУЗИЯ ────────────────────────────────────────
+
+def get_current_week_start():
+    """Понедельник текущей недели"""
+    from datetime import date, timedelta
+    today = date.today()
+    monday = today - timedelta(days=today.weekday())
+    return monday.strftime("%d.%m.%Y")
+
+def get_active_tasks():
+    """Активные задания текущей недели с прогрессом"""
+    conn = get_conn()
+    week = get_current_week_start()
+    tasks = conn.execute(
+        "SELECT * FROM weekly_tasks WHERE week_start=? ORDER BY id", (week,)
+    ).fetchall()
+    result = []
+    for t in tasks:
+        done = conn.execute(
+            "SELECT COUNT(*) as cnt, SUM(qty) as qty FROM extrusion_pallets WHERE decor=?",
+            (t["decor"],)
+        ).fetchone()
+        pallets_done = done["cnt"] or 0
+        qty_done = done["qty"] or 0
+        # Сколько паллет нужно (план / 150 плит на паллету)
+        pallets_needed = -(-t["plan_qty"] // 150)  # ceiling division
+        result.append({
+            "id": t["id"],
+            "decor": t["decor"],
+            "length": t["length"],
+            "thickness": t["thickness"],
+            "overlay": t["overlay"],
+            "plan_qty": t["plan_qty"],
+            "pallets_needed": pallets_needed,
+            "pallets_done": pallets_done,
+            "qty_done": qty_done,
+            "pct": round(qty_done / t["plan_qty"] * 100) if t["plan_qty"] else 0,
+            "done": qty_done >= t["plan_qty"],
+        })
+    conn.close()
+    return result
+
+def complete_task_pallet(task_id, operator, qty=150):
+    """Оператор нажал Сделано на паллете задания"""
+    from datetime import date as dt_date
+    conn = get_conn()
+    task = conn.execute("SELECT * FROM weekly_tasks WHERE id=?", (task_id,)).fetchone()
+    if not task:
+        conn.close()
+        return None
+    # Считаем следующий номер паллеты для этого декора
+    existing = conn.execute(
+        "SELECT COUNT(*) as cnt FROM extrusion_pallets WHERE decor=?", (task["decor"],)
+    ).fetchone()
+    pallet_num = (existing["cnt"] or 0) + 1
+    today = dt_date.today().strftime("%d.%m.%Y")
+    from datetime import datetime
+    time_str = datetime.now().strftime("%H:%M")
+    conn.execute("""
+        INSERT INTO extrusion_pallets
+        (date, shift, operator, decor, length, thickness, overlay,
+         pallet_num, qty, defect, time_str, status)
+        VALUES (?,?,?,?,?,?,?,?,?,0,?,'transit')
+    """, (today, "день", operator, task["decor"], task["length"],
+          task["thickness"], task["overlay"], pallet_num, qty, time_str))
+    conn.commit()
+    # Возвращаем прогресс
+    done = conn.execute(
+        "SELECT COUNT(*) as cnt, SUM(qty) as total FROM extrusion_pallets WHERE decor=?",
+        (task["decor"],)
+    ).fetchone()
+    conn.close()
+    return {
+        "decor": task["decor"],
+        "pallet_num": pallet_num,
+        "qty_done": done["total"] or 0,
+        "plan_qty": task["plan_qty"],
+        "pallets_done": done["cnt"] or 0,
+    }
+
 init_db()
