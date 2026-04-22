@@ -113,7 +113,8 @@ def role_menu(role):
         return kb("📊 Отчёт за сегодня", "📅 Отчёт за дату",
                   "📋 Задание на неделю", "🏭 Транзит",
                   "🏪 Склад", "⚗️ Рецептура",
-                  "👥 Пользователи", "🔑 Коды доступа")
+                  "🤖 ИИ Ассистент", "👥 Пользователи",
+                  "🔑 Коды доступа")
     elif role == "mixer":
         return kb("➕ Внести смену", "🏠 Меню")
     elif role == "extruder":
@@ -597,6 +598,111 @@ async def boss_view_tasks(message: types.Message, state: FSMContext):
         f"Итого: {total_done}/{total_plan} листов ({total_pct}%)",
         reply_markup=role_menu(role)
     )
+
+
+# ── ИИ АССИСТЕНТ ──────────────────────────────────────────────────────────────
+
+class AIChat(StatesGroup):
+    waiting = State()
+
+@dp.message_handler(lambda m: m.text == "🤖 ИИ Ассистент", state="*")
+async def ai_start(message: types.Message, state: FSMContext):
+    role = get_user_role(message.from_user.id)
+    if role != "boss":
+        await message.answer("⛔ Нет доступа"); return
+    await AIChat.waiting.set()
+    await message.answer(
+        "🤖 <b>ИИ Ассистент</b>\n\n"
+        "Я знаю всё о вашем производстве. Спрашивайте:\n\n"
+        "• Сколько листов выпущено за неделю?\n"
+        "• Какой % брака по декору 82019-9?\n"
+        "• Сколько паллет на складе?\n"
+        "• Что сейчас в транзите?\n\n"
+        "Введите вопрос или нажмите ◀️ Выйти из ИИ",
+        reply_markup=kb("◀️ Выйти из ИИ")
+    )
+
+@dp.message_handler(state=AIChat.waiting)
+async def ai_answer(message: types.Message, state: FSMContext):
+    if message.text in ["◀️ Выйти из ИИ", "/done"]:
+        await state.finish()
+        await show_menu(message, "boss"); return
+
+    thinking = await message.answer("🤔 Анализирую данные...")
+
+    try:
+        import urllib.request as ur
+        import json as js
+
+        # Собираем актуальные данные производства
+        tasks = fetch_tasks()
+        today = __import__('datetime').date.today().strftime("%d.%m.%Y")
+        report = get_daily_report(today)
+        warehouse = get_warehouse_summary()
+        warehouse_total = get_warehouse_total()
+        transit = get_transit_pallets()
+
+        context = f"""Ты — аналитик производства ЛВТ-ламината. Отвечай кратко и по делу на русском языке.
+
+ДАННЫЕ ПРОИЗВОДСТВА (актуальные):
+
+📅 Сегодня: {today}
+
+📦 Выпуск сегодня:
+- Листов: {report["total_qty"]}
+- Брак: {report["total_defect"]} ({round(report["total_defect"]/report["total_qty"]*100,1) if report["total_qty"] else 0}%)
+- Замесов: {report["batches"]}
+- Сырьё: {report["total_kg"]} кг
+
+По декорам сегодня:
+{chr(10).join(f"  {d['decor']}: {d['qty']} шт, брак {d['defect']}" for d in report["by_decor"]) or "  нет данных"}
+
+🏭 Транзитная зона: {len(transit)} паллет
+{chr(10).join(f"  {p['decor']} #{p['pallet_num']} - {p['qty']} шт" for p in transit) or "  пусто"}
+
+🏪 Склад:
+- Всего: {warehouse_total.get("total",0)} листов, {warehouse_total.get("pallets",0)} паллет
+{chr(10).join(f"  {s['decor']}: {s['total_qty']} шт ({s['pallets']} паллет)" for s in warehouse) or "  пусто"}
+
+📋 Текущее задание:
+{chr(10).join(f"  {t['decor']}: {t['done_qty']}/{t['plan_qty']} листов ({t['pct']}%)" for t in tasks) or "  задание не задано"}
+"""
+
+        ANTHROPIC_KEY = os.getenv("ANTHROPIC_API_KEY", "")
+        if not ANTHROPIC_KEY:
+            await thinking.delete()
+            await message.answer("⚠️ ANTHROPIC_API_KEY не задан в переменных окружения.")
+            return
+
+        payload = js.dumps({
+            "model": "claude-sonnet-4-20250514",
+            "max_tokens": 1000,
+            "messages": [{"role": "user", "content": f"{context}\n\nВопрос: {message.text}"}]
+        }).encode()
+
+        req = ur.Request(
+            "https://api.anthropic.com/v1/messages",
+            data=payload,
+            headers={
+                "Content-Type": "application/json",
+                "x-api-key": ANTHROPIC_KEY,
+                "anthropic-version": "2023-06-01"
+            },
+            method="POST"
+        )
+        with ur.urlopen(req, timeout=30) as resp:
+            result = js.loads(resp.read())
+            answer = result["content"][0]["text"]
+
+        await thinking.delete()
+        await message.answer(
+            f"🤖 {answer}",
+            reply_markup=kb("◀️ Выйти из ИИ")
+        )
+
+    except Exception as e:
+        await thinking.delete()
+        await message.answer(f"⚠️ Ошибка: {str(e)[:200]}")
 
 @dp.message_handler(state="*")
 async def fallback(message: types.Message, state: FSMContext):
