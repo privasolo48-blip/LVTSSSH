@@ -220,7 +220,8 @@ async def show_task_list(message, state):
     m.add(*[types.KeyboardButton(b) for b in btns])
 
     await ExtruderTask.selecting.set()
-    header = f"📋 <b>Задание на неделю</b> · {data.get('operator','')}\n\n"
+    week_label = tasks[0]["week_start"] if tasks else ""
+    header = f"📋 <b>Задание · неделя с {week_label}</b>\n👤 {data.get('operator','')}\n\n"
     footer = "\n\n<i>Нажмите на декор чтобы отметить паллету как выполненную</i>"
     await message.answer(
         header + "\n\n".join(lines) + footer,
