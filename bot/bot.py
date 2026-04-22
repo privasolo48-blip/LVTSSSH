@@ -154,7 +154,16 @@ async def auth_check(message: types.Message, state: FSMContext):
     await message.answer(f"✅ Доступ получен!\nРоль: <b>{ROLE_NAMES[role]}</b>")
     await show_menu(message, role)
 
-@dp.message_handler(lambda m: m.text in ["🚪 Выйти", "🏠 Меню", "🏠 Главное меню"], state="*")
+@dp.message_handler(lambda m: m.text == "🚪 Выйти", state="*")
+async def logout(message: types.Message, state: FSMContext):
+    await state.finish()
+    revoke_user(message.from_user.id)
+    await message.answer(
+        "👋 Вы вышли из аккаунта.\n\nДля входа нажмите /start и введите код доступа.",
+        reply_markup=types.ReplyKeyboardRemove()
+    )
+
+@dp.message_handler(lambda m: m.text in ["🏠 Меню", "🏠 Главное меню"], state="*")
 async def go_home(message: types.Message, state: FSMContext):
     await state.finish()
     role = get_user_role(message.from_user.id)
