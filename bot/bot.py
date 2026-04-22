@@ -1,5 +1,4 @@
-import os
-import sys
+import os, sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
 from aiogram import Bot, Dispatcher, types
@@ -10,23 +9,22 @@ from aiogram.utils import executor
 from datetime import date as dt_date
 
 from db.database import (
-    save_mixer_shift, save_pallet, save_remark,
-    save_task, get_daily_report, get_recipe, update_recipe,
-    get_tasks, get_pallets, init_db,
-    check_code, authorize_user, get_user_role,
-    get_all_users, revoke_user, get_codes, update_code
+    save_mixer_shift, save_pallet, save_remark, save_task,
+    get_daily_report, get_recipe, update_recipe, get_tasks, get_pallets,
+    check_code, authorize_user, get_user_role, get_all_users, revoke_user,
+    get_codes, update_code, get_transit_pallets, get_transit_count,
+    process_lacquer, get_warehouse_summary, get_warehouse_total, init_db
 )
 
 BOT_TOKEN = os.getenv("BOT_TOKEN", "ВСТАВЬ_ТОКЕН")
-
 bot = Bot(token=BOT_TOKEN, parse_mode="HTML")
-storage = MemoryStorage()
-dp = Dispatcher(bot, storage=storage)
+dp = Dispatcher(bot, storage=MemoryStorage())
 
 ROLE_NAMES = {
-    "mixer": "Миксерщик",
-    "extruder": "Оператор экструзии",
-    "boss": "Руководитель",
+    "mixer": "🧪 Миксерщик",
+    "extruder": "⚙️ Экструзия",
+    "lacquer": "🎨 Оператор лака",
+    "boss": "👑 Руководитель",
 }
 
 
@@ -36,33 +34,22 @@ class Auth(StatesGroup):
     code = State()
 
 class Mixer(StatesGroup):
-    date = State()
-    shift = State()
-    operator = State()
-    batches = State()
+    date = State(); shift = State(); operator = State(); batches = State()
 
 class Extruder(StatesGroup):
-    date = State()
-    shift = State()
-    operator = State()
-    decor = State()
-    length = State()
-    thickness = State()
-    overlay = State()
-    pallet_num = State()
-    qty = State()
-    defect = State()
-    time_str = State()
-    next_action = State()
+    date = State(); shift = State(); operator = State()
+    decor = State(); length = State(); thickness = State()
+    overlay = State(); pallet_num = State(); qty = State()
+    defect = State(); time_str = State(); next_action = State()
 
 class Remark(StatesGroup):
-    remark_type = State()
-    qty = State()
-    reason = State()
+    remark_type = State(); qty = State(); reason = State()
+
+class Lacquer(StatesGroup):
+    selecting = State()
 
 class Task(StatesGroup):
-    week_start = State()
-    adding = State()
+    week_start = State(); adding = State()
 
 class BossDate(StatesGroup):
     waiting = State()
@@ -70,10 +57,10 @@ class BossDate(StatesGroup):
 
 # ── HELPERS ───────────────────────────────────────────────────────────────────
 
-def kb(*rows, resize=True):
-    markup = types.ReplyKeyboardMarkup(resize_keyboard=resize, row_width=2)
-    markup.add(*[types.KeyboardButton(b) for b in rows])
-    return markup
+def kb(*buttons):
+    m = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
+    m.add(*[types.KeyboardButton(b) for b in buttons])
+    return m
 
 def remove_kb():
     return types.ReplyKeyboardRemove()
@@ -85,21 +72,26 @@ def role_menu(role):
     if role == "boss":
         return kb("📊 Отчёт за сегодня", "📅 Отчёт за дату",
                   "📋 Недельное задание", "⚗️ Рецептура",
+                  "🏭 Транзит", "🏪 Склад",
                   "👥 Пользователи", "🔑 Коды доступа")
     elif role == "mixer":
-        return kb("➕ Внести смену (миксер)", "🚪 Выйти")
+        return kb("➕ Внести смену", "🏠 Меню")
     elif role == "extruder":
-        return kb("➕ Внести паллету (экструзия)", "🚪 Выйти")
+        return kb("➕ Внести паллету", "🏭 Транзит", "🏠 Меню")
+    elif role == "lacquer":
+        return kb("📦 Транзитная зона", "✅ Обработать паллету", "🏪 Склад", "🏠 Меню")
     return remove_kb()
 
 async def show_menu(message, role):
+    transit = get_transit_count()
+    extra = f"\n⚠️ В транзите: <b>{transit} паллет</b>" if transit > 0 and role in ("lacquer","boss","extruder") else ""
     await message.answer(
-        f"👋 Вы вошли как: <b>{ROLE_NAMES[role]}</b>\n\nВыберите действие:",
+        f"Вы вошли как: <b>{ROLE_NAMES[role]}</b>{extra}\n\nВыберите действие:",
         reply_markup=role_menu(role)
     )
 
 
-# ── СТАРТ / АВТОРИЗАЦИЯ ──────────────────────────────────────────────────────
+# ── АВТОРИЗАЦИЯ ───────────────────────────────────────────────────────────────
 
 @dp.message_handler(commands=["start"], state="*")
 async def cmd_start(message: types.Message, state: FSMContext):
@@ -109,30 +101,19 @@ async def cmd_start(message: types.Message, state: FSMContext):
         await show_menu(message, role)
     else:
         await Auth.code.set()
-        await message.answer(
-            "🔐 Этот бот только для сотрудников.\n\nВведите код доступа:",
-            reply_markup=remove_kb()
-        )
+        await message.answer("🔐 Бот только для сотрудников.\n\nВведите код доступа:", reply_markup=remove_kb())
 
 @dp.message_handler(state=Auth.code)
 async def auth_check(message: types.Message, state: FSMContext):
     role = check_code(message.text)
     if not role:
-        await message.answer("❌ Неверный код. Попробуйте ещё раз.")
-        return
-    authorize_user(message.from_user.id, message.from_user.full_name,
-                   message.from_user.username, role)
+        await message.answer("❌ Неверный код. Попробуйте ещё раз."); return
+    authorize_user(message.from_user.id, message.from_user.full_name, message.from_user.username, role)
     await state.finish()
-    await message.answer(f"✅ Доступ получен. Роль: <b>{ROLE_NAMES[role]}</b>")
+    await message.answer(f"✅ Доступ получен!\nРоль: <b>{ROLE_NAMES[role]}</b>")
     await show_menu(message, role)
 
-@dp.message_handler(lambda m: m.text == "🚪 Выйти", state="*")
-async def logout(message: types.Message, state: FSMContext):
-    await state.finish()
-    revoke_user(message.from_user.id)
-    await message.answer("👋 Доступ отозван. Введите /start для входа.", reply_markup=remove_kb())
-
-@dp.message_handler(lambda m: m.text in ["🏠 Меню", "🏠 Главное меню"], state="*")
+@dp.message_handler(lambda m: m.text in ["🚪 Выйти", "🏠 Меню", "🏠 Главное меню"], state="*")
 async def go_home(message: types.Message, state: FSMContext):
     await state.finish()
     role = get_user_role(message.from_user.id)
@@ -144,42 +125,37 @@ async def go_home(message: types.Message, state: FSMContext):
 
 # ── МИКСЕР ────────────────────────────────────────────────────────────────────
 
-@dp.message_handler(lambda m: m.text == "➕ Внести смену (миксер)", state="*")
+@dp.message_handler(lambda m: m.text == "➕ Внести смену", state="*")
 async def mixer_start(message: types.Message, state: FSMContext):
-    if get_user_role(message.from_user.id) not in ("mixer", "boss"):
+    if get_user_role(message.from_user.id) not in ("mixer","boss"):
         await message.answer("⛔ Нет доступа"); return
-    await state.finish()
-    await Mixer.date.set()
-    await message.answer("Введите дату:", reply_markup=kb(today(), "◀️ Отмена"))
+    await state.finish(); await Mixer.date.set()
+    await message.answer("Дата:", reply_markup=kb(today(), "◀️ Отмена"))
 
 @dp.message_handler(state=Mixer.date)
-async def mixer_date(message: types.Message, state: FSMContext):
+async def mx_date(message: types.Message, state: FSMContext):
     if message.text == "◀️ Отмена":
         await state.finish(); await cmd_start(message, state); return
-    await state.update_data(date=message.text)
-    await Mixer.shift.set()
-    await message.answer("Смена:", reply_markup=kb("День", "Ночь", "◀️ Отмена"))
+    await state.update_data(date=message.text); await Mixer.shift.set()
+    await message.answer("Смена:", reply_markup=kb("День","Ночь","◀️ Отмена"))
 
 @dp.message_handler(state=Mixer.shift)
-async def mixer_shift(message: types.Message, state: FSMContext):
+async def mx_shift(message: types.Message, state: FSMContext):
     if message.text == "◀️ Отмена":
         await state.finish(); await cmd_start(message, state); return
-    await state.update_data(shift=message.text.lower())
-    await Mixer.operator.set()
+    await state.update_data(shift=message.text.lower()); await Mixer.operator.set()
     await message.answer("Ваше имя:", reply_markup=remove_kb())
 
 @dp.message_handler(state=Mixer.operator)
-async def mixer_operator(message: types.Message, state: FSMContext):
-    await state.update_data(operator=message.text)
-    await Mixer.batches.set()
-    await message.answer("Сколько замесов за смену?")
+async def mx_operator(message: types.Message, state: FSMContext):
+    await state.update_data(operator=message.text); await Mixer.batches.set()
+    await message.answer("Количество замесов:")
 
 @dp.message_handler(state=Mixer.batches)
-async def mixer_batches(message: types.Message, state: FSMContext):
+async def mx_batches(message: types.Message, state: FSMContext):
     if not message.text.isdigit():
-        await message.answer("Введите число, например: 17"); return
-    batches = int(message.text)
-    data = await state.get_data()
+        await message.answer("Введите число"); return
+    batches = int(message.text); data = await state.get_data()
     recipe = get_recipe()
     total_kg = sum(r["kg_per_batch"] for r in recipe) * batches
     lines = "\n".join(f"  {r['component']}: {r['kg_per_batch']*batches:.1f} кг" for r in recipe)
@@ -187,107 +163,96 @@ async def mixer_batches(message: types.Message, state: FSMContext):
     await state.finish()
     role = get_user_role(message.from_user.id)
     await message.answer(
-        f"✅ Смена сохранена!\n\n"
-        f"📅 {data['date']} · {data['shift'].capitalize()}\n"
-        f"👤 {data['operator']}\n"
-        f"🔄 Замесов: {batches}\n\n"
-        f"⚖️ Расход ({total_kg:.1f} кг итого):\n{lines}",
+        f"✅ Смена сохранена!\n📅 {data['date']} · {data['shift'].capitalize()}\n"
+        f"👤 {data['operator']}\n🔄 Замесов: {batches}\n\n"
+        f"⚖️ Расход ({total_kg:.1f} кг):\n{lines}",
         reply_markup=role_menu(role)
     )
 
 
-# ── ЭКСТРУЗИЯ ────────────────────────────────────────────────────────────────
+# ── ЭКСТРУЗИЯ ─────────────────────────────────────────────────────────────────
 
-@dp.message_handler(lambda m: m.text == "➕ Внести паллету (экструзия)", state="*")
+@dp.message_handler(lambda m: m.text == "➕ Внести паллету", state="*")
 async def ext_start(message: types.Message, state: FSMContext):
-    if get_user_role(message.from_user.id) not in ("extruder", "boss"):
+    if get_user_role(message.from_user.id) not in ("extruder","boss"):
         await message.answer("⛔ Нет доступа"); return
-    await state.finish()
-    await Extruder.date.set()
-    await message.answer("Введите дату:", reply_markup=kb(today(), "◀️ Отмена"))
+    await state.finish(); await Extruder.date.set()
+    await message.answer("Дата:", reply_markup=kb(today(),"◀️ Отмена"))
 
 @dp.message_handler(state=Extruder.date)
-async def ext_date(message: types.Message, state: FSMContext):
+async def ex_date(message: types.Message, state: FSMContext):
     if message.text == "◀️ Отмена":
         await state.finish(); await cmd_start(message, state); return
-    await state.update_data(date=message.text)
-    await Extruder.shift.set()
-    await message.answer("Смена:", reply_markup=kb("День", "Ночь", "◀️ Отмена"))
+    await state.update_data(date=message.text); await Extruder.shift.set()
+    await message.answer("Смена:", reply_markup=kb("День","Ночь","◀️ Отмена"))
 
 @dp.message_handler(state=Extruder.shift)
-async def ext_shift(message: types.Message, state: FSMContext):
+async def ex_shift(message: types.Message, state: FSMContext):
     if message.text == "◀️ Отмена":
         await state.finish(); await cmd_start(message, state); return
-    await state.update_data(shift=message.text.lower())
-    await Extruder.operator.set()
+    await state.update_data(shift=message.text.lower()); await Extruder.operator.set()
     await message.answer("Ваше имя:", reply_markup=remove_kb())
 
 @dp.message_handler(state=Extruder.operator)
-async def ext_operator(message: types.Message, state: FSMContext):
-    await state.update_data(operator=message.text)
-    await Extruder.decor.set()
+async def ex_operator(message: types.Message, state: FSMContext):
+    await state.update_data(operator=message.text); await Extruder.decor.set()
     await message.answer("Декор (например: 82019-9):")
 
 @dp.message_handler(state=Extruder.decor)
-async def ext_decor(message: types.Message, state: FSMContext):
-    await state.update_data(decor=message.text.strip())
-    await Extruder.length.set()
-    await message.answer("Длина (мм):", reply_markup=kb("1220", "1800"))
+async def ex_decor(message: types.Message, state: FSMContext):
+    await state.update_data(decor=message.text.strip()); await Extruder.length.set()
+    await message.answer("Длина (мм):", reply_markup=kb("1220","1800"))
 
 @dp.message_handler(state=Extruder.length)
-async def ext_length(message: types.Message, state: FSMContext):
-    await state.update_data(length=int(message.text))
-    await Extruder.thickness.set()
-    await message.answer("Толщина (мм):", reply_markup=kb("2", "3", "4", "5"))
+async def ex_length(message: types.Message, state: FSMContext):
+    await state.update_data(length=int(message.text)); await Extruder.thickness.set()
+    await message.answer("Толщина (мм):", reply_markup=kb("2","3","4","5"))
 
 @dp.message_handler(state=Extruder.thickness)
-async def ext_thickness(message: types.Message, state: FSMContext):
-    await state.update_data(thickness=float(message.text))
-    await Extruder.overlay.set()
-    await message.answer("Оверлайн:", reply_markup=kb("0.25", "0.3", "0.55"))
+async def ex_thickness(message: types.Message, state: FSMContext):
+    await state.update_data(thickness=float(message.text)); await Extruder.overlay.set()
+    await message.answer("Оверлайн:", reply_markup=kb("0.25","0.3","0.55"))
 
 @dp.message_handler(state=Extruder.overlay)
-async def ext_overlay(message: types.Message, state: FSMContext):
-    await state.update_data(overlay=float(message.text))
-    await Extruder.pallet_num.set()
-    await message.answer("Номер паллеты:", reply_markup=kb("1", "2", "3"))
+async def ex_overlay(message: types.Message, state: FSMContext):
+    await state.update_data(overlay=float(message.text)); await Extruder.pallet_num.set()
+    await message.answer("Номер паллеты:", reply_markup=kb("1","2","3","4","5"))
 
 @dp.message_handler(state=Extruder.pallet_num)
-async def ext_pallet(message: types.Message, state: FSMContext):
-    await state.update_data(pallet_num=int(message.text))
-    await Extruder.qty.set()
-    await message.answer("Количество листов:", reply_markup=kb("150", "200", "250"))
+async def ex_pallet(message: types.Message, state: FSMContext):
+    await state.update_data(pallet_num=int(message.text)); await Extruder.qty.set()
+    await message.answer("Количество листов:", reply_markup=kb("150","200","250"))
 
 @dp.message_handler(state=Extruder.qty)
-async def ext_qty(message: types.Message, state: FSMContext):
-    await state.update_data(qty=int(message.text))
-    await Extruder.defect.set()
-    await message.answer("Брак (кол-во листов):", reply_markup=kb("0", "1", "2", "5"))
+async def ex_qty(message: types.Message, state: FSMContext):
+    await state.update_data(qty=int(message.text)); await Extruder.defect.set()
+    await message.answer("Брак (листов):", reply_markup=kb("0","1","2","5"))
 
 @dp.message_handler(state=Extruder.defect)
-async def ext_defect(message: types.Message, state: FSMContext):
-    await state.update_data(defect=int(message.text))
-    await Extruder.time_str.set()
+async def ex_defect(message: types.Message, state: FSMContext):
+    await state.update_data(defect=int(message.text)); await Extruder.time_str.set()
     await message.answer("Время окончания (например: 03:05):", reply_markup=remove_kb())
 
 @dp.message_handler(state=Extruder.time_str)
-async def ext_time(message: types.Message, state: FSMContext):
+async def ex_time(message: types.Message, state: FSMContext):
     await state.update_data(time_str=message.text)
     data = await state.get_data()
-    save_pallet(data["date"], data["shift"], data["operator"],
-                data["decor"], data["length"], data["thickness"], data["overlay"],
-                data["pallet_num"], data["qty"], data["defect"], data["time_str"])
+    save_pallet(data["date"],data["shift"],data["operator"],data["decor"],
+                data["length"],data["thickness"],data["overlay"],
+                data["pallet_num"],data["qty"],data["defect"],data["time_str"])
+    transit = get_transit_count()
     await Extruder.next_action.set()
     await message.answer(
-        f"✅ Паллета сохранена!\n\n"
-        f"🎨 {data['decor']} · {data['length']}мм · {data['thickness']}мм\n"
-        f"📦 Паллета #{data['pallet_num']}: {data['qty']} листов, брак: {data['defect']}\n"
-        f"⏱ {data['time_str']}",
-        reply_markup=kb("➕ Ещё паллета", "⚠️ Замечание", "🔒 Закрыть смену", "🏠 Меню")
+        f"✅ Паллета #{data['pallet_num']} сохранена!\n"
+        f"🎨 {data['decor']} · {data['qty']} листов · брак {data['defect']}\n"
+        f"⏱ {data['time_str']}\n\n"
+        f"🏭 Паллета отправлена в транзитную зону\n"
+        f"📦 Всего в транзите: {transit} паллет",
+        reply_markup=kb("➕ Ещё паллета","⚠️ Замечание","🔒 Закрыть смену","🏠 Меню")
     )
 
 @dp.message_handler(state=Extruder.next_action)
-async def ext_next(message: types.Message, state: FSMContext):
+async def ex_next(message: types.Message, state: FSMContext):
     data = await state.get_data()
     role = get_user_role(message.from_user.id)
     if message.text == "➕ Ещё паллета":
@@ -295,85 +260,161 @@ async def ext_next(message: types.Message, state: FSMContext):
         await message.answer("Декор:", reply_markup=remove_kb())
     elif message.text == "⚠️ Замечание":
         await Remark.remark_type.set()
-        await message.answer("Тип замечания:", reply_markup=kb("Обрыв", "Остановка", "Другое"))
+        await message.answer("Тип:", reply_markup=kb("Обрыв","Остановка","Другое"))
     elif message.text == "🔒 Закрыть смену":
         pallets = get_pallets(data.get("date"), data.get("shift"))
         total = sum(p["qty"] for p in pallets)
         defect = sum(p["defect"] for p in pallets)
-        pct = round(defect / total * 100, 1) if total else 0
+        pct = round(defect/total*100,1) if total else 0
         await state.finish()
         await message.answer(
             f"🔒 Смена закрыта\n📅 {data.get('date')} · {data.get('shift','').capitalize()}\n"
-            f"📦 Итого: {total} листов\n❌ Брак: {defect} ({pct}%)",
+            f"📦 Листов: {total} · Брак: {defect} ({pct}%)",
             reply_markup=role_menu(role)
         )
     else:
-        await state.finish()
-        await show_menu(message, role)
-
-
-# ── ЗАМЕЧАНИЯ ────────────────────────────────────────────────────────────────
+        await state.finish(); await show_menu(message, role)
 
 @dp.message_handler(state=Remark.remark_type)
-async def remark_type(message: types.Message, state: FSMContext):
-    await state.update_data(remark_type=message.text)
-    await Remark.qty.set()
-    await message.answer("Количество (раз):", reply_markup=remove_kb())
+async def rem_type(message: types.Message, state: FSMContext):
+    await state.update_data(remark_type=message.text); await Remark.qty.set()
+    await message.answer("Количество:", reply_markup=remove_kb())
 
 @dp.message_handler(state=Remark.qty)
-async def remark_qty(message: types.Message, state: FSMContext):
+async def rem_qty(message: types.Message, state: FSMContext):
     await state.update_data(qty=int(message.text) if message.text.isdigit() else 0)
-    await Remark.reason.set()
-    await message.answer("Причина:")
+    await Remark.reason.set(); await message.answer("Причина:")
 
 @dp.message_handler(state=Remark.reason)
-async def remark_reason(message: types.Message, state: FSMContext):
+async def rem_reason(message: types.Message, state: FSMContext):
     data = await state.get_data()
-    save_remark(data.get("date", today()), data.get("shift", ""),
-                data.get("operator", ""), data["remark_type"], data["qty"], message.text)
+    save_remark(data.get("date",today()),data.get("shift",""),
+                data.get("operator",""),data["remark_type"],data["qty"],message.text)
     await Extruder.next_action.set()
     await message.answer("✅ Замечание сохранено.",
-                         reply_markup=kb("➕ Ещё паллета", "⚠️ Замечание", "🔒 Закрыть смену", "🏠 Меню"))
+                         reply_markup=kb("➕ Ещё паллета","⚠️ Замечание","🔒 Закрыть смену","🏠 Меню"))
 
 
-# ── РУКОВОДИТЕЛЬ ─────────────────────────────────────────────────────────────
+# ── ТРАНЗИТ ───────────────────────────────────────────────────────────────────
+
+@dp.message_handler(lambda m: m.text in ["🏭 Транзит","🏭 Транзитная зона","📦 Транзитная зона"], state="*")
+async def show_transit(message: types.Message, state: FSMContext):
+    role = get_user_role(message.from_user.id)
+    if role not in ("lacquer","boss","extruder"):
+        await message.answer("⛔ Нет доступа"); return
+    pallets = get_transit_pallets()
+    if not pallets:
+        await message.answer("✅ Транзитная зона пуста — все паллеты обработаны!",
+                             reply_markup=role_menu(role)); return
+    lines = []
+    for p in pallets:
+        lines.append(f"🔸 <b>ID{p['id']}</b> · {p['decor']} · #{p['pallet_num']} · {p['qty']} шт · {p['date']}")
+    await message.answer(
+        f"🏭 <b>Транзитная зона</b> ({len(pallets)} паллет):\n\n" + "\n".join(lines) +
+        "\n\nДля обработки нажми <b>✅ Обработать паллету</b>",
+        reply_markup=role_menu(role)
+    )
+
+
+# ── ЛАК ───────────────────────────────────────────────────────────────────────
+
+@dp.message_handler(lambda m: m.text == "✅ Обработать паллету", state="*")
+async def lac_start(message: types.Message, state: FSMContext):
+    if get_user_role(message.from_user.id) not in ("lacquer","boss"):
+        await message.answer("⛔ Нет доступа"); return
+    pallets = get_transit_pallets()
+    if not pallets:
+        await message.answer("✅ Нет паллет для обработки — транзит пуст!"); return
+    await state.finish()
+    # Показываем кнопки с ID паллет
+    btns = [f"ID{p['id']}: {p['decor']} #{p['pallet_num']} ({p['qty']}шт)" for p in pallets]
+    btns.append("◀️ Назад")
+    m = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=1)
+    m.add(*[types.KeyboardButton(b) for b in btns])
+    await Lacquer.selecting.set()
+    await message.answer("Выберите паллету которую обработали:", reply_markup=m)
+
+@dp.message_handler(state=Lacquer.selecting)
+async def lac_select(message: types.Message, state: FSMContext):
+    role = get_user_role(message.from_user.id)
+    if message.text == "◀️ Назад":
+        await state.finish(); await show_menu(message, role); return
+    try:
+        pallet_id = int(message.text.split(":")[0].replace("ID","").strip())
+        operator = message.from_user.full_name
+        process_lacquer(pallet_id, operator)
+        transit = get_transit_count()
+        await state.finish()
+        await message.answer(
+            f"✅ Паллета ID{pallet_id} обработана лаком!\n"
+            f"📦 Отправлена на <b>Склад</b>\n\n"
+            f"🏭 Осталось в транзите: {transit} паллет",
+            reply_markup=role_menu(role)
+        )
+    except Exception as e:
+        await message.answer(f"Ошибка: {e}\nВыберите паллету из списка.")
+
+
+# ── СКЛАД ─────────────────────────────────────────────────────────────────────
+
+@dp.message_handler(lambda m: m.text == "🏪 Склад", state="*")
+async def show_warehouse(message: types.Message, state: FSMContext):
+    role = get_user_role(message.from_user.id)
+    if role not in ("lacquer","boss","extruder"):
+        await message.answer("⛔ Нет доступа"); return
+    summary = get_warehouse_summary()
+    total = get_warehouse_total()
+    if not summary:
+        await message.answer("📦 Склад пуст.", reply_markup=role_menu(role)); return
+    lines = []
+    for s in summary:
+        lines.append(f"🎨 <b>{s['decor']}</b>: {s['total_qty']} шт · {s['pallets']} паллет")
+    await message.answer(
+        f"🏪 <b>Склад</b>\n"
+        f"Всего: <b>{total['total']} листов</b> · {total['pallets']} паллет\n\n" +
+        "\n".join(lines),
+        reply_markup=role_menu(role)
+    )
+
+
+# ── РУКОВОДИТЕЛЬ ──────────────────────────────────────────────────────────────
 
 @dp.message_handler(lambda m: m.text == "📊 Отчёт за сегодня", state="*")
-async def report_today(message: types.Message, state: FSMContext):
+async def rep_today(message: types.Message, state: FSMContext):
     if get_user_role(message.from_user.id) != "boss":
         await message.answer("⛔ Нет доступа"); return
     await send_report(message, today())
 
 @dp.message_handler(lambda m: m.text == "📅 Отчёт за дату", state="*")
-async def report_date_ask(message: types.Message, state: FSMContext):
+async def rep_date_ask(message: types.Message, state: FSMContext):
     if get_user_role(message.from_user.id) != "boss":
         await message.answer("⛔ Нет доступа"); return
     await BossDate.waiting.set()
     await message.answer("Введите дату (дд.мм.гггг):", reply_markup=remove_kb())
 
 @dp.message_handler(state=BossDate.waiting)
-async def report_date(message: types.Message, state: FSMContext):
-    await state.finish()
-    await send_report(message, message.text)
+async def rep_date(message: types.Message, state: FSMContext):
+    await state.finish(); await send_report(message, message.text)
 
 async def send_report(message, date_str):
     r = get_daily_report(date_str)
-    pct = round(r["total_defect"] / r["total_qty"] * 100, 1) if r["total_qty"] else 0
+    pct = round(r["total_defect"]/r["total_qty"]*100,1) if r["total_qty"] else 0
     by_decor = "\n".join(f"  • {d['decor']}: {d['qty']} шт, брак {d['defect']}"
                          for d in r["by_decor"]) or "  нет данных"
     remarks = "\n".join(f"  • {rm['remark_type']}: {rm['qty']}x — {rm['reason']}"
-                        for rm in r["remarks"]) or "  нет замечаний"
+                        for rm in r["remarks"]) or "  нет"
     recipe_lines = "\n".join(f"  {c['component']}: {c['kg_per_batch']*r['batches']:.1f} кг"
                              for c in r["recipe"])
     await message.answer(
-        f"📊 Отчёт за {date_str}\n{'─'*28}\n"
+        f"📊 <b>Отчёт за {date_str}</b>\n{'─'*28}\n"
         f"🔄 Замесов: {r['batches']} ({r['mixer_detail']})\n"
         f"⚖️ Сырьё: {r['total_kg']:.1f} кг\n\n"
         f"📦 Выпуск: {r['total_qty']} листов\n"
         f"❌ Брак: {r['total_defect']} ({pct}%)\n\n"
         f"По декорам:\n{by_decor}\n\n"
+        f"🎨 Лак: {r['lac_pallets']} паллет · {r['lac_qty']} листов\n\n"
         f"⚠️ Замечания:\n{remarks}\n\n"
-        f"⚗️ Расход:\n{recipe_lines}",
+        f"⚗️ Расход сырья:\n{recipe_lines}",
         reply_markup=role_menu("boss")
     )
 
@@ -382,120 +423,110 @@ async def task_start(message: types.Message, state: FSMContext):
     if get_user_role(message.from_user.id) != "boss":
         await message.answer("⛔ Нет доступа"); return
     await Task.week_start.set()
-    await message.answer("Дата начала недели (пн, дд.мм.гггг):", reply_markup=remove_kb())
+    await message.answer("Дата начала недели (дд.мм.гггг):", reply_markup=remove_kb())
 
 @dp.message_handler(state=Task.week_start)
 async def task_week(message: types.Message, state: FSMContext):
-    await state.update_data(week_start=message.text, tasks=[])
+    date_text = message.text.strip()
+    for p in ["пн, ","вт, ","ср, ","чт, ","пт, ","сб, ","вс, "]:
+        if date_text.lower().startswith(p): date_text = date_text[len(p):].strip(); break
+    await state.update_data(week_start=date_text, tasks=[])
     await Task.adding.set()
     await message.answer(
-        "Вводите строки задания:\n<декор> <длина> <толщина> <оверлайн> <кол-во>\n\n"
-        "Пример: 82019-9 1220 2 0.25 800\n\nПо окончании отправьте /done"
+        f"📋 Задание на неделю с <b>{date_text}</b>\n\n"
+        "Введите строки (можно несколько через Enter):\n"
+        "<code>декор длина толщина оверлайн кол-во</code>\n\n"
+        "<code>82019-9 1220 2 0.25 800</code>\n"
+        "<code>81111-4 1220 2 0.25 600</code>\n\n"
+        "По окончании отправьте /done"
     )
 
 @dp.message_handler(state=Task.adding)
 async def task_add(message: types.Message, state: FSMContext):
-    if message.text == "/done":
+    if message.text.strip() == "/done":
         data = await state.get_data()
+        tasks = data.get("tasks",[])
         await state.finish()
-        await message.answer(f"✅ Задание сохранено. Позиций: {len(data.get('tasks',[]))}",
-                             reply_markup=role_menu("boss"))
-        return
-    try:
-        parts = message.text.split()
-        decor, length, thickness, overlay, qty = (
-            parts[0], int(parts[1]), float(parts[2]), float(parts[3]), int(parts[4]))
-        data = await state.get_data()
-        save_task(data["week_start"], decor, length, thickness, overlay, qty)
-        tasks = data.get("tasks", []) + [decor]
-        await state.update_data(tasks=tasks)
-        await message.answer(f"✅ {decor} · {qty} шт. Следующий или /done")
-    except Exception:
-        await message.answer("⚠️ Формат: 82019-9 1220 2 0.25 800")
+        lines = "\n".join(f"  • {t['decor']} — {t['qty']} шт." for t in tasks)
+        await message.answer(f"✅ Задание сохранено!\nПозиций: {len(tasks)}\n{lines}",
+                             reply_markup=role_menu("boss")); return
+    rows = [l.strip() for l in message.text.strip().split("\n") if l.strip()]
+    data = await state.get_data(); saved = []; errors = []
+    for row in rows:
+        try:
+            p = row.split()
+            decor,length,thickness,overlay,qty = p[0],int(p[1]),float(p[2]),float(p[3]),int(p[4])
+            save_task(data["week_start"],decor,length,thickness,overlay,qty)
+            saved.append({"decor":decor,"qty":qty})
+        except Exception: errors.append(row)
+    tasks = data.get("tasks",[]) + saved
+    await state.update_data(tasks=tasks)
+    resp = "\n".join(f"✅ {t['decor']} · {t['qty']} шт." for t in saved)
+    if errors: resp += f"\n⚠️ Не распознано: {len(errors)} строк"
+    resp += f"\n\nВсего: {len(tasks)} поз. Ещё или /done"
+    await message.answer(resp)
 
 @dp.message_handler(lambda m: m.text == "⚗️ Рецептура", state="*")
 async def recipe_show(message: types.Message, state: FSMContext):
     if get_user_role(message.from_user.id) != "boss":
         await message.answer("⛔ Нет доступа"); return
-    recipe = get_recipe()
-    total = sum(r["kg_per_batch"] for r in recipe)
-    lines = "\n".join(f"  {r['component']}: {r['kg_per_batch']} кг" for r in recipe)
-    await message.answer(
-        f"⚗️ Рецептура (на 1 замес):\n\n{lines}\n\nИтого: {total:.2f} кг\n\n"
-        f"Изменить: <code>/recipe Компонент кг</code>\n"
-        f"Пример: <code>/recipe Мел-100 230</code>"
-    )
+    r = get_recipe(); total = sum(x["kg_per_batch"] for x in r)
+    lines = "\n".join(f"  {x['component']}: {x['kg_per_batch']} кг" for x in r)
+    await message.answer(f"⚗️ Рецептура:\n\n{lines}\n\nИтого: {total:.2f} кг/замес\n\n"
+                         f"Изменить: <code>/recipe Компонент кг</code>")
 
 @dp.message_handler(commands=["recipe"], state="*")
 async def recipe_update(message: types.Message, state: FSMContext):
     if get_user_role(message.from_user.id) != "boss":
         await message.answer("⛔ Нет доступа"); return
-    parts = message.text.split(maxsplit=2)
-    if len(parts) < 3:
-        await message.answer("Формат: /recipe <компонент> <кг>"); return
-    try:
-        update_recipe(parts[1], float(parts[2]))
-        await message.answer(f"✅ {parts[1]}: {parts[2]} кг/замес")
-    except Exception as e:
-        await message.answer(f"Ошибка: {e}")
+    p = message.text.split(maxsplit=2)
+    if len(p) < 3: await message.answer("Формат: /recipe Компонент кг"); return
+    update_recipe(p[1], float(p[2]))
+    await message.answer(f"✅ {p[1]}: {p[2]} кг/замес")
 
 @dp.message_handler(lambda m: m.text == "👥 Пользователи", state="*")
 async def users_list(message: types.Message, state: FSMContext):
     if get_user_role(message.from_user.id) != "boss":
         await message.answer("⛔ Нет доступа"); return
     users = get_all_users()
-    if not users:
-        await message.answer("Нет авторизованных пользователей."); return
-    lines = []
-    for u in users:
-        uname = f"@{u['username']}" if u["username"] else "(без username)"
-        lines.append(f"• <b>{u['name']}</b> {uname}\n"
-                     f"  Роль: {ROLE_NAMES.get(u['role'], u['role'])} · ID: <code>{u['tg_id']}</code>")
-    await message.answer("👥 <b>Пользователи:</b>\n\n" + "\n\n".join(lines) +
-                         "\n\n<i>Отозвать: /revoke TG_ID</i>")
+    if not users: await message.answer("Нет пользователей."); return
+    lines = [f"• <b>{u['name']}</b> {('@'+u['username']) if u['username'] else ''}\n"
+             f"  {ROLE_NAMES.get(u['role'],u['role'])} · ID: <code>{u['tg_id']}</code>"
+             for u in users]
+    await message.answer("👥 <b>Пользователи:</b>\n\n"+"\n\n".join(lines)+
+                         "\n\nОтозвать: <code>/revoke TG_ID</code>")
 
 @dp.message_handler(commands=["revoke"], state="*")
 async def revoke_cmd(message: types.Message, state: FSMContext):
     if get_user_role(message.from_user.id) != "boss":
         await message.answer("⛔ Нет доступа"); return
-    parts = message.text.split()
-    if len(parts) < 2:
-        await message.answer("Формат: /revoke <TG_ID>"); return
-    revoke_user(int(parts[1]))
-    await message.answer(f"✅ Доступ для {parts[1]} отозван.")
+    p = message.text.split()
+    if len(p) < 2: await message.answer("Формат: /revoke TG_ID"); return
+    revoke_user(int(p[1])); await message.answer(f"✅ Доступ для {p[1]} отозван.")
 
 @dp.message_handler(lambda m: m.text == "🔑 Коды доступа", state="*")
 async def codes_show(message: types.Message, state: FSMContext):
     if get_user_role(message.from_user.id) != "boss":
         await message.answer("⛔ Нет доступа"); return
     codes = get_codes()
-    lines = "\n".join(f"  {ROLE_NAMES.get(c['role'],c['role'])}: <code>{c['code']}</code>"
-                      for c in codes)
-    await message.answer(
-        f"🔑 <b>Коды доступа:</b>\n\n{lines}\n\n"
-        f"Сменить: <code>/code mixer новый_код</code>"
-    )
+    lines = "\n".join(f"  {ROLE_NAMES.get(c['role'],c['role'])}: <code>{c['code']}</code>" for c in codes)
+    await message.answer(f"🔑 <b>Коды доступа:</b>\n\n{lines}\n\n"
+                         f"Сменить: <code>/code mixer новый_код</code>")
 
 @dp.message_handler(commands=["code"], state="*")
 async def code_update(message: types.Message, state: FSMContext):
     if get_user_role(message.from_user.id) != "boss":
         await message.answer("⛔ Нет доступа"); return
-    parts = message.text.split()
-    if len(parts) < 3:
-        await message.answer("Формат: /code <mixer|extruder|boss> <новый_код>"); return
-    update_code(parts[1], parts[2])
-    await message.answer(f"✅ Код для {parts[1]} обновлён: <code>{parts[2]}</code>")
+    p = message.text.split()
+    if len(p) < 3: await message.answer("Формат: /code роль код"); return
+    update_code(p[1], p[2])
+    await message.answer(f"✅ Код для {p[1]}: <code>{p[2]}</code>")
 
 @dp.message_handler(state="*")
 async def fallback(message: types.Message, state: FSMContext):
     role = get_user_role(message.from_user.id)
-    if role:
-        await show_menu(message, role)
-    else:
-        await message.answer("Введите /start для входа.")
-
-
-# ── ЗАПУСК ────────────────────────────────────────────────────────────────────
+    if role: await show_menu(message, role)
+    else: await message.answer("Введите /start")
 
 if __name__ == "__main__":
     init_db()
