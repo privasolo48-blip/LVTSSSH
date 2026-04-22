@@ -3,3 +3,4 @@ aiohttp==3.8.6
 flask==2.3.3
 python-dotenv==1.0.0
 Werkzeug==2.3.7
+openpyxl==3.1.2
