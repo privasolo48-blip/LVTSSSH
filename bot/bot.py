@@ -13,7 +13,8 @@ from db.database import (
     get_daily_report, get_recipe, update_recipe, get_tasks, get_pallets,
     check_code, authorize_user, get_user_role, get_all_users, revoke_user,
     get_codes, update_code, get_transit_pallets, get_transit_count,
-    process_lacquer, get_warehouse_summary, get_warehouse_total, init_db
+    process_lacquer, get_warehouse_summary, get_warehouse_total, init_db,
+    get_active_tasks, complete_task_pallet
 )
 
 BOT_TOKEN = os.getenv("BOT_TOKEN", "ВСТАВЬ_ТОКЕН")
@@ -41,6 +42,11 @@ class Extruder(StatesGroup):
     decor = State(); length = State(); thickness = State()
     overlay = State(); pallet_num = State(); qty = State()
     defect = State(); time_str = State(); next_action = State()
+
+class ExtruderTask(StatesGroup):
+    operator = State()
+    selecting = State()
+    confirm_qty = State()
 
 class Remark(StatesGroup):
     remark_type = State(); qty = State(); reason = State()
@@ -77,7 +83,7 @@ def role_menu(role):
     elif role == "mixer":
         return kb("➕ Внести смену", "🏠 Меню")
     elif role == "extruder":
-        return kb("➕ Внести паллету", "🏭 Транзит", "🏠 Меню")
+        return kb("📋 Задание на смену", "🏭 Транзит", "🏠 Меню")
     elif role == "lacquer":
         return kb("📦 Транзитная зона", "✅ Обработать паллету", "🏪 Склад", "🏠 Меню")
     return remove_kb()
@@ -170,129 +176,129 @@ async def mx_batches(message: types.Message, state: FSMContext):
     )
 
 
-# ── ЭКСТРУЗИЯ ─────────────────────────────────────────────────────────────────
+# ── ЭКСТРУЗИЯ (ЗАДАНИЕ-ОРИЕНТИРОВАННАЯ) ──────────────────────────────────────
 
-@dp.message_handler(lambda m: m.text == "➕ Внести паллету", state="*")
-async def ext_start(message: types.Message, state: FSMContext):
-    if get_user_role(message.from_user.id) not in ("extruder","boss"):
+@dp.message_handler(lambda m: m.text == "📋 Задание на смену", state="*")
+async def ext_task_start(message: types.Message, state: FSMContext):
+    if get_user_role(message.from_user.id) not in ("extruder", "boss"):
         await message.answer("⛔ Нет доступа"); return
-    await state.finish(); await Extruder.date.set()
-    await message.answer("Дата:", reply_markup=kb(today(),"◀️ Отмена"))
+    await state.finish()
+    tasks = get_active_tasks()
+    if not tasks:
+        await message.answer(
+            "📋 Задание на эту неделю не задано.\n\nОбратитесь к руководителю.",
+            reply_markup=role_menu(get_user_role(message.from_user.id))
+        ); return
+    await ExtruderTask.operator.set()
+    await message.answer("Введите ваше имя:", reply_markup=remove_kb())
 
-@dp.message_handler(state=Extruder.date)
-async def ex_date(message: types.Message, state: FSMContext):
-    if message.text == "◀️ Отмена":
-        await state.finish(); await cmd_start(message, state); return
-    await state.update_data(date=message.text); await Extruder.shift.set()
-    await message.answer("Смена:", reply_markup=kb("День","Ночь","◀️ Отмена"))
+@dp.message_handler(state=ExtruderTask.operator)
+async def ext_task_operator(message: types.Message, state: FSMContext):
+    await state.update_data(operator=message.text)
+    await show_task_list(message, state)
 
-@dp.message_handler(state=Extruder.shift)
-async def ex_shift(message: types.Message, state: FSMContext):
-    if message.text == "◀️ Отмена":
-        await state.finish(); await cmd_start(message, state); return
-    await state.update_data(shift=message.text.lower()); await Extruder.operator.set()
-    await message.answer("Ваше имя:", reply_markup=remove_kb())
-
-@dp.message_handler(state=Extruder.operator)
-async def ex_operator(message: types.Message, state: FSMContext):
-    await state.update_data(operator=message.text); await Extruder.decor.set()
-    await message.answer("Декор (например: 82019-9):")
-
-@dp.message_handler(state=Extruder.decor)
-async def ex_decor(message: types.Message, state: FSMContext):
-    await state.update_data(decor=message.text.strip()); await Extruder.length.set()
-    await message.answer("Длина (мм):", reply_markup=kb("1220","1800"))
-
-@dp.message_handler(state=Extruder.length)
-async def ex_length(message: types.Message, state: FSMContext):
-    await state.update_data(length=int(message.text)); await Extruder.thickness.set()
-    await message.answer("Толщина (мм):", reply_markup=kb("2","3","4","5"))
-
-@dp.message_handler(state=Extruder.thickness)
-async def ex_thickness(message: types.Message, state: FSMContext):
-    await state.update_data(thickness=float(message.text)); await Extruder.overlay.set()
-    await message.answer("Оверлайн:", reply_markup=kb("0.25","0.3","0.55"))
-
-@dp.message_handler(state=Extruder.overlay)
-async def ex_overlay(message: types.Message, state: FSMContext):
-    await state.update_data(overlay=float(message.text)); await Extruder.pallet_num.set()
-    await message.answer("Номер паллеты:", reply_markup=kb("1","2","3","4","5"))
-
-@dp.message_handler(state=Extruder.pallet_num)
-async def ex_pallet(message: types.Message, state: FSMContext):
-    await state.update_data(pallet_num=int(message.text)); await Extruder.qty.set()
-    await message.answer("Количество листов:", reply_markup=kb("150","200","250"))
-
-@dp.message_handler(state=Extruder.qty)
-async def ex_qty(message: types.Message, state: FSMContext):
-    await state.update_data(qty=int(message.text)); await Extruder.defect.set()
-    await message.answer("Брак (листов):", reply_markup=kb("0","1","2","5"))
-
-@dp.message_handler(state=Extruder.defect)
-async def ex_defect(message: types.Message, state: FSMContext):
-    await state.update_data(defect=int(message.text)); await Extruder.time_str.set()
-    await message.answer("Время окончания (например: 03:05):", reply_markup=remove_kb())
-
-@dp.message_handler(state=Extruder.time_str)
-async def ex_time(message: types.Message, state: FSMContext):
-    await state.update_data(time_str=message.text)
+async def show_task_list(message, state):
+    tasks = get_active_tasks()
     data = await state.get_data()
-    save_pallet(data["date"],data["shift"],data["operator"],data["decor"],
-                data["length"],data["thickness"],data["overlay"],
-                data["pallet_num"],data["qty"],data["defect"],data["time_str"])
-    transit = get_transit_count()
-    await Extruder.next_action.set()
+    lines = []
+    btns = []
+    for t in tasks:
+        status = "✅" if t["done"] else ("🟡" if t["pct"] >= 50 else "🔴")
+        bar = "█" * (t["pct"] // 10) + "░" * (10 - t["pct"] // 10)
+        lines.append(
+            f"{status} <b>{t['decor']}</b> · {t['length']}мм · {t['thickness']}мм\n"
+            f"   {bar} {t['pct']}%\n"
+            f"   Сделано: {t['qty_done']}/{t['plan_qty']} листов ({t['pallets_done']} паллет из {t['pallets_needed']})"
+        )
+        if not t["done"]:
+            btns.append(f"✔️ {t['decor']} ({t['pallets_done']}/{t['pallets_needed']})")
+
+    btns.append("⚠️ Замечание")
+    btns.append("🏠 Меню")
+
+    m = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=1)
+    m.add(*[types.KeyboardButton(b) for b in btns])
+
+    await ExtruderTask.selecting.set()
+    header = f"📋 <b>Задание на неделю</b> · {data.get('operator','')}\n\n"
+    footer = "\n\n<i>Нажмите на декор чтобы отметить паллету как выполненную</i>"
     await message.answer(
-        f"✅ Паллета #{data['pallet_num']} сохранена!\n"
-        f"🎨 {data['decor']} · {data['qty']} листов · брак {data['defect']}\n"
-        f"⏱ {data['time_str']}\n\n"
-        f"🏭 Паллета отправлена в транзитную зону\n"
-        f"📦 Всего в транзите: {transit} паллет",
-        reply_markup=kb("➕ Ещё паллета","⚠️ Замечание","🔒 Закрыть смену","🏠 Меню")
+        header + "\n\n".join(lines) + footer,
+        reply_markup=m
     )
 
-@dp.message_handler(state=Extruder.next_action)
-async def ex_next(message: types.Message, state: FSMContext):
-    data = await state.get_data()
+@dp.message_handler(state=ExtruderTask.selecting)
+async def ext_task_select(message: types.Message, state: FSMContext):
     role = get_user_role(message.from_user.id)
-    if message.text == "➕ Ещё паллета":
-        await Extruder.decor.set()
-        await message.answer("Декор:", reply_markup=remove_kb())
-    elif message.text == "⚠️ Замечание":
-        await Remark.remark_type.set()
-        await message.answer("Тип:", reply_markup=kb("Обрыв","Остановка","Другое"))
-    elif message.text == "🔒 Закрыть смену":
-        pallets = get_pallets(data.get("date"), data.get("shift"))
-        total = sum(p["qty"] for p in pallets)
-        defect = sum(p["defect"] for p in pallets)
-        pct = round(defect/total*100,1) if total else 0
-        await state.finish()
-        await message.answer(
-            f"🔒 Смена закрыта\n📅 {data.get('date')} · {data.get('shift','').capitalize()}\n"
-            f"📦 Листов: {total} · Брак: {defect} ({pct}%)",
-            reply_markup=role_menu(role)
-        )
-    else:
-        await state.finish(); await show_menu(message, role)
-
-@dp.message_handler(state=Remark.remark_type)
-async def rem_type(message: types.Message, state: FSMContext):
-    await state.update_data(remark_type=message.text); await Remark.qty.set()
-    await message.answer("Количество:", reply_markup=remove_kb())
-
-@dp.message_handler(state=Remark.qty)
-async def rem_qty(message: types.Message, state: FSMContext):
-    await state.update_data(qty=int(message.text) if message.text.isdigit() else 0)
-    await Remark.reason.set(); await message.answer("Причина:")
-
-@dp.message_handler(state=Remark.reason)
-async def rem_reason(message: types.Message, state: FSMContext):
     data = await state.get_data()
-    save_remark(data.get("date",today()),data.get("shift",""),
-                data.get("operator",""),data["remark_type"],data["qty"],message.text)
-    await Extruder.next_action.set()
-    await message.answer("✅ Замечание сохранено.",
-                         reply_markup=kb("➕ Ещё паллета","⚠️ Замечание","🔒 Закрыть смену","🏠 Меню"))
+
+    if message.text == "🏠 Меню":
+        await state.finish(); await show_menu(message, role); return
+
+    if message.text == "⚠️ Замечание":
+        await Remark.remark_type.set()
+        await message.answer("Тип замечания:", reply_markup=kb("Обрыв", "Остановка", "Другое")); return
+
+    # Парсим декор из кнопки вида "✔️ 82019-9 (2/6)"
+    if message.text.startswith("✔️ "):
+        try:
+            decor = message.text.replace("✔️ ", "").split(" (")[0].strip()
+            # Найти task_id по декору
+            tasks = get_active_tasks()
+            task = next((t for t in tasks if t["decor"] == decor), None)
+            if not task:
+                await message.answer("Задание не найдено."); return
+            if task["done"]:
+                await message.answer(f"✅ {decor} уже полностью выполнен!"); return
+
+            await state.update_data(task_id=task["id"], decor=decor,
+                                    plan_qty=task["plan_qty"], qty_done=task["qty_done"])
+            await ExtruderTask.confirm_qty.set()
+
+            remaining = task["plan_qty"] - task["qty_done"]
+            default_qty = min(150, remaining)
+            await message.answer(
+                f"📦 Паллета готова: <b>{decor}</b>\n\n"
+                f"Осталось произвести: {remaining} листов\n\n"
+                f"Сколько листов на этой паллете?",
+                reply_markup=kb(str(default_qty), "150", "200", "◀️ Назад")
+            )
+        except Exception as e:
+            await message.answer(f"Ошибка: {e}")
+    else:
+        await message.answer("Выберите декор из списка или нажмите 🏠 Меню")
+
+@dp.message_handler(state=ExtruderTask.confirm_qty)
+async def ext_task_confirm(message: types.Message, state: FSMContext):
+    role = get_user_role(message.from_user.id)
+    data = await state.get_data()
+
+    if message.text == "◀️ Назад":
+        await show_task_list(message, state); return
+
+    try:
+        qty = int(message.text)
+    except ValueError:
+        await message.answer("Введите число листов"); return
+
+    result = complete_task_pallet(data["task_id"], data.get("operator",""), qty)
+    if not result:
+        await message.answer("Ошибка — задание не найдено"); return
+
+    transit = get_transit_count()
+    pct = round(result["qty_done"] / result["plan_qty"] * 100) if result["plan_qty"] else 0
+    done_flag = "✅ Задание выполнено!" if pct >= 100 else ""
+
+    await message.answer(
+        f"✅ Паллета #{result['pallet_num']} записана!\n"
+        f"🎨 {result['decor']} · {qty} листов\n"
+        f"🏭 Отправлена в транзитную зону\n\n"
+        f"Прогресс: {result['qty_done']}/{result['plan_qty']} листов ({pct}%)\n"
+        f"Паллет сдано: {result['pallets_done']}\n"
+        f"{done_flag}"
+    )
+    # Вернуться к списку заданий
+    await show_task_list(message, state)
 
 
 # ── ТРАНЗИТ ───────────────────────────────────────────────────────────────────
