@@ -25,9 +25,9 @@ def require_auth(f):
         auth = request.authorization
         if not auth or auth.username != WEB_LOGIN or auth.password != WEB_PASSWORD:
             return Response(
-                '🔐 Требуется авторизация',
+                'Требуется авторизация. Введите логин и пароль.',
                 401,
-                {'WWW-Authenticate': 'Basic realm="ЛВТ Производство"'}
+                {'WWW-Authenticate': 'Basic realm="LVT Production"'}
             )
         return f(*args, **kwargs)
     return decorated
