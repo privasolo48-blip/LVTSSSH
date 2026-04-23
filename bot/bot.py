@@ -20,38 +20,21 @@ from db.database import (
 BOT_TOKEN = os.getenv("BOT_TOKEN", "ВСТАВЬ_ТОКЕН")
 WEB_URL = os.getenv("WEB_URL", "").rstrip("/")
 
-import urllib.request, json as _json
-
 def fetch_tasks():
-    """Получить задание из веб-панели (единый источник правды)"""
-    if not WEB_URL:
-        return []
+    """Получить задание напрямую из БД"""
     try:
-        with urllib.request.urlopen(f"{WEB_URL}/api/tasks", timeout=5) as r:
-            data = _json.loads(r.read())
-            return data.get("tasks", [])
+        return get_active_tasks()
     except Exception as e:
         print(f"[fetch_tasks error] {e}", flush=True)
         return []
 
 def post_complete(task_id, operator, qty):
-    """Отметить паллету как выполненную через API"""
-    if not WEB_URL:
-        return complete_task_pallet(task_id, operator, qty)
+    """Отметить паллету через БД"""
     try:
-        payload = _json.dumps({"task_id": task_id, "operator": operator, "qty": qty}).encode()
-        req = urllib.request.Request(
-            f"{WEB_URL}/api/complete_pallet",
-            data=payload,
-            headers={"Content-Type": "application/json"},
-            method="POST"
-        )
-        with urllib.request.urlopen(req, timeout=5) as r:
-            data = _json.loads(r.read())
-            return data.get("result") if data.get("ok") else None
+        return complete_task_pallet(task_id, operator, qty)
     except Exception as e:
         print(f"[post_complete error] {e}", flush=True)
-        return complete_task_pallet(task_id, operator, qty)
+        return None
 bot = Bot(token=BOT_TOKEN, parse_mode="HTML")
 dp = Dispatcher(bot, storage=MemoryStorage())
 
