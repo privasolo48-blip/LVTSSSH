@@ -22,15 +22,44 @@ WEB_LOGIN = os.getenv("WEB_LOGIN", "admin")
 def require_auth(f):
     @functools.wraps(f)
     def decorated(*args, **kwargs):
-        auth = request.authorization
-        if not auth or auth.username != WEB_LOGIN or auth.password != WEB_PASSWORD:
-            return Response(
-                'Требуется авторизация. Введите логин и пароль.',
-                401,
-                {'WWW-Authenticate': 'Basic realm="LVT Production"'}
-            )
-        return f(*args, **kwargs)
+        # Check cookie
+        if request.cookies.get("auth") == f"{WEB_LOGIN}:{WEB_PASSWORD}":
+            return f(*args, **kwargs)
+        # Check form submission
+        if request.method == "POST" and request.form.get("_login"):
+            if (request.form.get("_login") == WEB_LOGIN and
+                    request.form.get("_password") == WEB_PASSWORD):
+                resp = f(*args, **kwargs)
+                from flask import make_response
+                r = make_response(resp)
+                r.set_cookie("auth", f"{WEB_LOGIN}:{WEB_PASSWORD}",
+                             max_age=86400*30, httponly=True)
+                return r
+        # Show login form
+        return _login_page()
     return decorated
+
+def _login_page(error=""):
+    from flask import Response as R
+    html = f"""<!DOCTYPE html><html lang="ru"><head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>LVT - Вход</title>
+<style>*{{box-sizing:border-box;margin:0;padding:0}}
+body{{font-family:system-ui,sans-serif;background:#f5f5f0;display:flex;align-items:center;justify-content:center;min-height:100vh}}
+.box{{background:#fff;border:1px solid #e0ddd5;border-radius:12px;padding:40px;width:320px;text-align:center}}
+h1{{font-size:18px;color:#185FA5;margin-bottom:6px}}p{{font-size:13px;color:#6b6b66;margin-bottom:20px}}
+input{{width:100%;padding:10px;border:1px solid #e0ddd5;border-radius:8px;font-size:14px;margin-bottom:10px}}
+button{{width:100%;padding:10px;background:#185FA5;color:#fff;border:none;border-radius:8px;font-size:14px;cursor:pointer}}
+.err{{color:#A32D2D;font-size:13px;margin-bottom:10px}}</style></head>
+<body><div class="box">
+<h1>LVT Production</h1><p>Panel</p>
+{"<div class=err>Неверный логин или пароль</div>" if error else ""}
+<form method="post">
+<input name="_login" placeholder="Логин" required>
+<input name="_password" type="password" placeholder="Пароль" required>
+<button type="submit">Войти</button>
+</form></div></body></html>"""
+    return R(html, 200, {{"Content-Type": "text/html; charset=utf-8"}})
 
 NAV = [
     ("/", "Отчёт"),
