@@ -1,7 +1,8 @@
 import os, sys, io, json
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
-from flask import Flask, render_template_string, request, send_file, Markup, Response
+from flask import Flask, render_template_string, request, send_file, Response
+from markupsafe import Markup
 import functools
 from datetime import date, timedelta
 from db.database import (
