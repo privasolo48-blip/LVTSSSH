@@ -434,7 +434,9 @@ def get_daily_report(date_str):
     remarks = c.fetchall()
 
     if USE_PG:
-        c.execute("SELECT COUNT(*) as cnt, SUM(ep.qty) as qty FROM lacquer_records lr JOIN extrusion_pallets ep ON lr.pallet_id=ep.id WHERE lr.processed_at::date=%s::date", (date_str,))
+        c.execute("""SELECT COUNT(*) as cnt, SUM(ep.qty) as qty 
+                     FROM lacquer_records lr JOIN extrusion_pallets ep ON lr.pallet_id=ep.id 
+                     WHERE lr.operator IS NOT NULL AND ep.date=%s""", (date_str,))
     else:
         c.execute("SELECT COUNT(*) as cnt, SUM(ep.qty) as qty FROM lacquer_records lr JOIN extrusion_pallets ep ON lr.pallet_id=ep.id WHERE date(lr.processed_at)=?", (date_str,))
     lac = c.fetchone()
