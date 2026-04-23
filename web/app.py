@@ -1,9 +1,8 @@
 import os, sys, io, json
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
-from flask import Flask, render_template_string, request, send_file, Response
+from flask import Flask, render_template_string, request, send_file
 from markupsafe import Markup
-import functools
 from datetime import date, timedelta
 from db.database import (
     get_daily_report, get_mixer_shifts, get_pallets, get_tasks,
@@ -16,51 +15,7 @@ from db.database import (
 
 app = Flask(__name__)
 app.secret_key = os.getenv("SECRET_KEY", "lvt-2026")
-WEB_PASSWORD = os.getenv("WEB_PASSWORD", "admin2026")
-WEB_LOGIN = os.getenv("WEB_LOGIN", "admin")
 
-def require_auth(f):
-    @functools.wraps(f)
-    def decorated(*args, **kwargs):
-        # Check cookie
-        if request.cookies.get("auth") == f"{WEB_LOGIN}:{WEB_PASSWORD}":
-            return f(*args, **kwargs)
-        # Check form submission
-        if request.method == "POST" and request.form.get("_login"):
-            if (request.form.get("_login") == WEB_LOGIN and
-                    request.form.get("_password") == WEB_PASSWORD):
-                resp = f(*args, **kwargs)
-                from flask import make_response
-                r = make_response(resp)
-                r.set_cookie("auth", f"{WEB_LOGIN}:{WEB_PASSWORD}",
-                             max_age=86400*30, httponly=True)
-                return r
-        # Show login form
-        return _login_page()
-    return decorated
-
-def _login_page(error=""):
-    from flask import Response as R
-    html = f"""<!DOCTYPE html><html lang="ru"><head>
-<meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>LVT - Вход</title>
-<style>*{{box-sizing:border-box;margin:0;padding:0}}
-body{{font-family:system-ui,sans-serif;background:#f5f5f0;display:flex;align-items:center;justify-content:center;min-height:100vh}}
-.box{{background:#fff;border:1px solid #e0ddd5;border-radius:12px;padding:40px;width:320px;text-align:center}}
-h1{{font-size:18px;color:#185FA5;margin-bottom:6px}}p{{font-size:13px;color:#6b6b66;margin-bottom:20px}}
-input{{width:100%;padding:10px;border:1px solid #e0ddd5;border-radius:8px;font-size:14px;margin-bottom:10px}}
-button{{width:100%;padding:10px;background:#185FA5;color:#fff;border:none;border-radius:8px;font-size:14px;cursor:pointer}}
-.err{{color:#A32D2D;font-size:13px;margin-bottom:10px}}</style></head>
-<body><div class="box">
-<h1>LVT Production</h1><p>Panel</p>
-{"<div class=err>Неверный логин или пароль</div>" if error else ""}
-<form method="post">
-<input name="_login" placeholder="Логин" required>
-<input name="_password" type="password" placeholder="Пароль" required>
-<button type="submit">Войти</button>
-</form></div></body></html>"""
-    headers = {"Content-Type": "text/html; charset=utf-8"}
-    return R(html, 200, headers)
 
 NAV = [
     ("/", "Отчёт"),
@@ -150,7 +105,6 @@ def render(active, content):
 # ── ОТЧЁТ ─────────────────────────────────────────────────────────────────────
 
 @app.route("/")
-@require_auth
 def report():
     ds = request.args.get("date", date.today().strftime("%d.%m.%Y"))
     r = get_daily_report(ds)
@@ -203,7 +157,6 @@ def report():
 # ── ТРАНЗИТ ───────────────────────────────────────────────────────────────────
 
 @app.route("/transit")
-@require_auth
 def transit_page():
     pallets = get_transit_pallets()
     rows = ""
@@ -235,7 +188,6 @@ def transit_page():
 # ── СКЛАД ─────────────────────────────────────────────────────────────────────
 
 @app.route("/warehouse", methods=["GET","POST"])
-@require_auth
 def warehouse_page():
     decor_filter = request.args.get("decor","")
     pallets = get_warehouse_pallets(decor_filter if decor_filter else None)
@@ -335,7 +287,6 @@ def warehouse_page():
 # ── ЛАК ───────────────────────────────────────────────────────────────────────
 
 @app.route("/lacquer")
-@require_auth
 def lacquer_page():
     records = get_lacquer_records(100)
     rows = "".join(f'<tr><td>{r["processed_at"][:16]}</td><td><b>{r["decor"]}</b></td>'
@@ -351,7 +302,6 @@ def lacquer_page():
 # ── ЭКСПОРТ В EXCEL (через ИИ-ассистент) ─────────────────────────────────────
 
 @app.route("/export", methods=["GET","POST"])
-@require_auth
 def export_page():
     ai_response = ""
     if request.method == "POST" and request.form.get("action") == "ai":
@@ -394,7 +344,6 @@ def export_page():
 
 
 @app.route("/export/download")
-@require_auth
 def export_download():
     try:
         import openpyxl
@@ -489,7 +438,6 @@ def get_ai_answer(question):
 # ── ОСТАЛЬНЫЕ РАЗДЕЛЫ ─────────────────────────────────────────────────────────
 
 @app.route("/week")
-@require_auth
 def week_page():
     ws = request.args.get("week", date.today().strftime("%d.%m.%Y"))
     tasks = get_tasks(ws)
@@ -513,7 +461,6 @@ def week_page():
     return render("/week", content)
 
 @app.route("/mixer")
-@require_auth
 def mixer_page():
     shifts = get_mixer_shifts()
     rows = "".join(f'<tr><td>{s["date"]}</td>'
@@ -525,7 +472,6 @@ def mixer_page():
     return render("/mixer", content)
 
 @app.route("/extruder")
-@require_auth
 def extruder_page():
     df = request.args.get("date","")
     pallets = get_pallets(df if df else None)
@@ -551,7 +497,6 @@ def extruder_page():
     return render("/extruder", content)
 
 @app.route("/tasks", methods=["GET","POST"])
-@require_auth
 def tasks_page():
     msg = ""
     if request.method == "POST":
@@ -590,7 +535,6 @@ def tasks_page():
 
 
 @app.route("/users", methods=["GET","POST"])
-@require_auth
 def users_page():
     msg = ""
     if request.method == "POST":
@@ -654,7 +598,6 @@ def users_page():
     return render("/users", content_html)
 
 @app.route("/recipe", methods=["GET","POST"])
-@require_auth
 def recipe_page():
     msg = ""
     if request.method == "POST":
@@ -686,7 +629,6 @@ def recipe_page():
 # ── API для бота ──────────────────────────────────────────────────────────────
 
 @app.route("/api/tasks")
-@require_auth
 def api_tasks():
     """Возвращает актуальное задание в JSON для бота"""
     tasks = get_tasks()  # берёт последнее задание
@@ -716,7 +658,6 @@ def api_tasks():
     return jsonify({"tasks": result, "week": result[0]["week_start"] if result else ""})
 
 @app.route("/api/complete_pallet", methods=["POST"])
-@require_auth
 def api_complete_pallet():
     """Оператор отметил паллету как выполненную"""
     from flask import jsonify
