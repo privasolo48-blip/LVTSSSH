@@ -1,7 +1,7 @@
 import os, sys, io, json
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
-from flask import Flask, render_template_string, request, send_file, Markup
+from flask import Flask, render_template_string, request, send_file, Markup, session, redirect
 from datetime import date, timedelta
 from db.database import (
     get_daily_report, get_mixer_shifts, get_pallets, get_tasks,
@@ -9,11 +9,12 @@ from db.database import (
     get_all_users, revoke_user, get_codes, update_code,
     get_transit_pallets, get_warehouse_summary, get_warehouse_total,
     get_warehouse_pallets, get_lacquer_records, get_full_export,
-    get_active_tasks, complete_task_pallet
+    get_active_tasks, complete_task_pallet, save_pallet
 )
 
 app = Flask(__name__)
 app.secret_key = os.getenv("SECRET_KEY", "lvt-2026")
+WEB_PASSWORD = os.getenv("WEB_PASSWORD", "admin2026")
 
 NAV = [
     ("/", "Отчёт"),
@@ -80,8 +81,61 @@ input,select,textarea{padding:7px 10px;border:1px solid var(--bor);border-radius
 </style>
 """
 
+
+LOGIN_PAGE = """
+<!DOCTYPE html><html lang="ru"><head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>ЛВТ — Вход</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:system-ui,sans-serif;background:#f5f5f0;display:flex;align-items:center;justify-content:center;min-height:100vh}
+.box{background:#fff;border:1px solid #e0ddd5;border-radius:12px;padding:40px;width:340px;text-align:center}
+h1{font-size:20px;color:#185FA5;margin-bottom:6px}
+p{font-size:13px;color:#6b6b66;margin-bottom:24px}
+input{width:100%;padding:10px 14px;border:1px solid #e0ddd5;border-radius:8px;font-size:14px;margin-bottom:12px}
+button{width:100%;padding:10px;background:#185FA5;color:#fff;border:none;border-radius:8px;font-size:14px;cursor:pointer}
+button:hover{opacity:.9}
+.err{color:#A32D2D;font-size:13px;margin-bottom:12px}
+</style></head><body>
+<div class="box">
+  <h1>ЛВТ Производство</h1>
+  <p>Панель управления</p>
+  {% if error %}<div class="err">{{ error }}</div>{% endif %}
+  <form method="post">
+    <input type="password" name="password" placeholder="Пароль" autofocus required>
+    <button type="submit">Войти</button>
+  </form>
+</div></body></html>
+"""
+
+def is_logged_in():
+    return session.get("logged_in") is True
+
+def require_login():
+    if not is_logged_in():
+        return redirect("/login")
+    return None
+
+@app.route("/login", methods=["GET","POST"])
+def login():
+    error = ""
+    if request.method == "POST":
+        if request.form.get("password") == WEB_PASSWORD:
+            session["logged_in"] = True
+            return redirect("/")
+        error = "Неверный пароль"
+    from flask import render_template_string as rts
+    return rts(LOGIN_PAGE, error=error)
+
+@app.route("/logout")
+def logout():
+    session.clear()
+    return redirect("/login")
+
+
 def nav_html(active):
     links = "".join(f'<a href="{u}" class="{"active" if u==active else ""}">{l}</a>' for u,l in NAV)
+    links += '<a href="/logout" style="margin-left:8px;color:#A32D2D;border-color:#A32D2D">🚪 Выйти</a>'
     transit = get_transit_pallets()
     alert = f'<span style="background:#FF9800;color:#fff;padding:3px 8px;border-radius:6px;font-size:11px;margin-left:8px">⚠️ Транзит: {len(transit)}</span>' if transit else ""
     return f'<div class="top"><h1>ЛВТ Производство{alert}</h1><nav class="nav">{links}</nav></div>'
@@ -101,6 +155,8 @@ def render(active, content):
 
 @app.route("/")
 def report():
+    auth = require_login()
+    if auth: return auth
     ds = request.args.get("date", date.today().strftime("%d.%m.%Y"))
     r = get_daily_report(ds)
     pct = round(r["total_defect"]/r["total_qty"]*100,1) if r["total_qty"] else 0
@@ -153,6 +209,8 @@ def report():
 
 @app.route("/transit")
 def transit_page():
+    auth = require_login()
+    if auth: return auth
     pallets = get_transit_pallets()
     rows = ""
     for p in pallets:
@@ -182,8 +240,10 @@ def transit_page():
 
 # ── СКЛАД ─────────────────────────────────────────────────────────────────────
 
-@app.route("/warehouse")
+@app.route("/warehouse", methods=["GET","POST"])
 def warehouse_page():
+    auth = require_login()
+    if auth: return auth
     decor_filter = request.args.get("decor","")
     pallets = get_warehouse_pallets(decor_filter if decor_filter else None)
     summary = get_warehouse_summary()
@@ -209,7 +269,54 @@ def warehouse_page():
     options = '<option value="">Все декоры</option>' + "".join(
         f'<option value="{d}" {"selected" if d==decor_filter else ""}>{d}</option>' for d in decors)
 
+    # Handle manual add
+    add_msg = ""
+    if request.method == "POST" and request.form.get("action") == "add_manual":
+        try:
+            from datetime import date as dt
+            save_pallet(
+                request.form.get("date", dt.today().strftime("%d.%m.%Y")),
+                request.form.get("shift", "день"),
+                request.form.get("operator", "Ручной ввод"),
+                request.form["decor"],
+                int(request.form.get("length", 1220)),
+                float(request.form.get("thickness", 2)),
+                float(request.form.get("overlay", 0.25)),
+                int(request.form.get("pallet_num", 1)),
+                int(request.form["qty"]),
+                int(request.form.get("defect", 0)),
+                request.form.get("time_str", ""),
+            )
+            # Move directly to warehouse
+            from db.database import get_conn
+            conn = get_conn(); c = conn.cursor()
+            from db.database import P
+            c.execute(f"UPDATE extrusion_pallets SET status='warehouse' WHERE decor={P} AND status='transit' AND operator='Ручной ввод' ORDER BY id DESC LIMIT 1",
+                      (request.form["decor"],))
+            from db.database import get_conn as gc2
+            conn.commit(); conn.close()
+            add_msg = '<div style="color:var(--grn);margin-bottom:12px;padding:10px;background:var(--grn-bg);border-radius:8px">✅ Паллета добавлена на склад</div>'
+        except Exception as e:
+            add_msg = f'<div style="color:var(--red);margin-bottom:12px;padding:10px;background:var(--red-bg);border-radius:8px">Ошибка: {e}</div>'
+
+    # Manual add form
+    manual_form = """
+    <div class="card" style="margin-bottom:12px">
+      <h2>➕ Добавить паллету вручную</h2>
+      <form method="post" style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px;align-items:end">
+        <input type="hidden" name="action" value="add_manual">
+        <div class="fr"><label>Декор</label><input name="decor" placeholder="82019-9" required></div>
+        <div class="fr"><label>Кол-во листов</label><input name="qty" type="number" placeholder="150" required></div>
+        <div class="fr"><label>Брак</label><input name="defect" type="number" value="0"></div>
+        <div class="fr"><label>Дата</label><input name="date" placeholder="22.04.2026"></div>
+        <div class="fr"><label>Оператор</label><input name="operator" value="Ручной ввод"></div>
+        <div class="fr"><label>&nbsp;</label><button type="submit" class="btn btn-grn" style="width:100%">Добавить на склад</button></div>
+      </form>
+    </div>"""
+
     content = f"""
+    {add_msg}
+    {manual_form}
     <div class="g4">
       <div class="met grn"><div class="lb">Листов на складе</div><div class="vl">{total["total"] or 0}</div><div class="sb">всего</div></div>
       <div class="met"><div class="lb">Паллет</div><div class="vl">{total["pallets"] or 0}</div></div>
@@ -236,6 +343,8 @@ def warehouse_page():
 
 @app.route("/lacquer")
 def lacquer_page():
+    auth = require_login()
+    if auth: return auth
     records = get_lacquer_records(100)
     rows = "".join(f'<tr><td>{r["processed_at"][:16]}</td><td><b>{r["decor"]}</b></td>'
                    f'<td>#{r["pallet_num"]}</td><td>{r["qty"]}</td><td>{r["operator"]}</td></tr>'
@@ -251,6 +360,8 @@ def lacquer_page():
 
 @app.route("/export", methods=["GET","POST"])
 def export_page():
+    auth = require_login()
+    if auth: return auth
     ai_response = ""
     if request.method == "POST" and request.form.get("action") == "ai":
         question = request.form.get("question","")
@@ -387,6 +498,8 @@ def get_ai_answer(question):
 
 @app.route("/week")
 def week_page():
+    auth = require_login()
+    if auth: return auth
     ws = request.args.get("week", date.today().strftime("%d.%m.%Y"))
     tasks = get_tasks(ws)
     prog = ""
@@ -410,6 +523,8 @@ def week_page():
 
 @app.route("/mixer")
 def mixer_page():
+    auth = require_login()
+    if auth: return auth
     shifts = get_mixer_shifts()
     rows = "".join(f'<tr><td>{s["date"]}</td>'
                    f'<td><span class="badge {"day" if s["shift"]=="день" else "night"}">{s["shift"].capitalize()}</span></td>'
@@ -421,6 +536,8 @@ def mixer_page():
 
 @app.route("/extruder")
 def extruder_page():
+    auth = require_login()
+    if auth: return auth
     df = request.args.get("date","")
     pallets = get_pallets(df if df else None)
     rows = "".join(f'<tr><td>{p["date"]}</td>'
@@ -446,6 +563,8 @@ def extruder_page():
 
 @app.route("/tasks", methods=["GET","POST"])
 def tasks_page():
+    auth = require_login()
+    if auth: return auth
     msg = ""
     if request.method == "POST":
         try:
@@ -484,6 +603,8 @@ def tasks_page():
 
 @app.route("/users", methods=["GET","POST"])
 def users_page():
+    auth = require_login()
+    if auth: return auth
     msg = ""
     if request.method == "POST":
         try:
@@ -547,6 +668,8 @@ def users_page():
 
 @app.route("/recipe", methods=["GET","POST"])
 def recipe_page():
+    auth = require_login()
+    if auth: return auth
     msg = ""
     if request.method == "POST":
         try:
