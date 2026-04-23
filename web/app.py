@@ -59,7 +59,8 @@ button{{width:100%;padding:10px;background:#185FA5;color:#fff;border:none;border
 <input name="_password" type="password" placeholder="Пароль" required>
 <button type="submit">Войти</button>
 </form></div></body></html>"""
-    return R(html, 200, {{"Content-Type": "text/html; charset=utf-8"}})
+    headers = {"Content-Type": "text/html; charset=utf-8"}
+    return R(html, 200, headers)
 
 NAV = [
     ("/", "Отчёт"),
